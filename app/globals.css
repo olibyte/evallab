@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #0b0f17;
+  --color-surface-raised: #131a26;
+  --color-border-subtle: #1f2937;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: #e5e7eb;
+}
