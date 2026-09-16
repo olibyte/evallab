@@ -13,3 +13,4 @@ playwright-report/
 .vercel
 next-env.d.ts
 *.tsbuildinfo
+evals/results/*.json
