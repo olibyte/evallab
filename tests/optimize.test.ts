@@ -97,7 +97,7 @@ describe("generateSyntheticCasesBatch", () => {
     expect(new Set(report.accepted.map((c) => c.id)).size).toBe(6);
   });
 
-  it("counts a failed batch request as rejected rather than losing it", async () => {
+  it("counts a failed batch request in requests, not as rejected candidates", async () => {
     const report = await generateSyntheticCasesBatch({
       client: fakeBatchClient("generation", (request) =>
         request.customId === "spec-1"
@@ -115,7 +115,13 @@ describe("generateSyntheticCasesBatch", () => {
     });
 
     expect(report.accepted).toHaveLength(4);
-    expect(report.rejected).toBe(2);
+    // A request that never returned produced no candidate to reject. Adding
+    // its planned count to `rejected` is what turned 36 unusable replies into
+    // "288 rejected candidates" in the 2026-09-16 run.
+    expect(report.rejected).toBe(0);
+    expect(report.diagnostics.requestOutcomes["request-failed"]).toBe(1);
+    expect(report.diagnostics.casesReturned).toBe(4);
+    expect(report.diagnostics.casesNeverReturned).toBe(2);
   });
 
   it("applies the same validation as the sequential path", async () => {

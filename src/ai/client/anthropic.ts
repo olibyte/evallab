@@ -34,6 +34,12 @@ export type ModelCallResult = {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Why the model stopped. `"max_tokens"` means the reply was cut off, so
+   * callers that parse structured output must treat it as truncation rather
+   * than as malformed output.
+   */
+  stopReason?: string;
 };
 
 export interface ModelClient {
@@ -99,6 +105,7 @@ export function createModelClient(role: ModelRole): ModelClient {
           model,
           inputTokens: message.usage.input_tokens,
           outputTokens: message.usage.output_tokens,
+          stopReason: message.stop_reason ?? undefined,
         };
       } catch (error) {
         if (error instanceof Anthropic.APIConnectionTimeoutError) {

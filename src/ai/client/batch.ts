@@ -30,6 +30,8 @@ export type BatchItemResult = {
   error?: string;
   inputTokens: number;
   outputTokens: number;
+  /** `"max_tokens"` when the reply was cut off by the output ceiling. */
+  stopReason?: string;
 };
 
 export interface BatchModelClient {
@@ -207,5 +209,6 @@ export function toItemResult(entry: BatchEntry): BatchItemResult {
       .join(""),
     inputTokens: message.usage.input_tokens,
     outputTokens: message.usage.output_tokens,
+    stopReason: message.stop_reason ?? undefined,
   };
 }

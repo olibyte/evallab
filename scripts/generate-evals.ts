@@ -12,9 +12,13 @@ import { createBatchModelClient } from "@/src/ai/client/batch";
 import {
   generateSyntheticCases,
   generateSyntheticCasesBatch,
+  outputTokenBudget,
   planBatches,
+  plannedCaseCount,
+  trimPlanToCaseLimit,
   type BatchKind,
   type BatchSpec,
+  type GenerationDiagnostics,
 } from "@/src/evals/generate-cases";
 import {
   assertPaidEvalsAllowed,
@@ -46,9 +50,15 @@ Batch execution submits every planned batch as one Message Batches job at
 half the cost, queued rather than real-time. EVAL_USE_BATCH_API=true makes
 it the default. The batch id and plan are recorded under evals/results/pending/
 on submission so the job can be collected later with --resume.
+EVAL_MAX_CASES caps the plan before submission, so a capped run does not pay
+for cases it would discard.
+
 Accepted cases are appended to evals/datasets/generated.jsonl; existing
 cases are never regenerated or overwritten. New cases are assigned a split
 immediately, so none can sit outside the dev/holdout partition.
+Every run writes a rejection breakdown to evals/results/<stamp>-generate.json:
+request outcomes in requests, case rejections in candidates, and the planned
+cases that never came back.
 `.trim();
 
 const pendingGenerationSchema = z.object({
@@ -99,7 +109,7 @@ async function main() {
     console.log(`Planned ${specs.length} batch(es):`);
     for (const spec of specs) {
       console.log(
-        `  ${spec.kind.padEnd(11)} ${spec.category.padEnd(16)} ${spec.difficulty.padEnd(6)} x${spec.count}  ${spec.angle}`,
+        `  ${spec.kind.padEnd(11)} ${spec.category.padEnd(16)} ${spec.difficulty.padEnd(6)} x${spec.count}  <=${outputTokenBudget(spec)} out tok  ${spec.angle}`,
       );
     }
     return;
@@ -117,6 +127,19 @@ async function main() {
   const existing = loadDatasetFile("generated.jsonl");
   const usage = new UsageTracker(env.EVAL_MAX_SPEND_USD);
   const maxCases = resolveCaseLimit();
+
+  // Trim before submitting, not while ingesting. Capping at ingest time bills
+  // for the whole plan and throws the overflow away.
+  if (!resumeBatchId && maxCases !== undefined) {
+    const planned = plannedCaseCount(specs);
+    if (planned > maxCases) {
+      const before = specs.length;
+      specs = trimPlanToCaseLimit(specs, maxCases);
+      console.log(
+        `EVAL_MAX_CASES=${maxCases} caps this plan: asking for ${plannedCaseCount(specs)} case(s) across ${specs.length} batch(es) instead of ${planned} across ${before}. Raise or unset EVAL_MAX_CASES to generate the full corpus.`,
+      );
+    }
+  }
 
   console.log(
     resumeBatchId
@@ -173,19 +196,90 @@ async function main() {
   const { manifest, assigned } = assignSplits(allCases, loadSplitManifest());
   if (Object.keys(assigned).length > 0) saveSplitManifest(manifest);
 
+  const diagnostics = report.diagnostics;
+  const diagnosticsPath = writeDiagnostics(diagnostics, {
+    execution: useBatch ? "batch" : "sequential",
+    batchId: collectedBatchId,
+    accepted: report.accepted.length,
+    corpusSize: merged.length,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    estimatedCostUsd: usage.estimatedCostUsd,
+    unpricedModels: usage.unpricedModels,
+  });
+
   console.log(
     [
       "",
+      `Prompt           ${diagnostics.promptId}`,
       `Batches called   ${report.batches}`,
+      `Planned cases    ${diagnostics.plannedCases}`,
+      `Cases returned   ${diagnostics.casesReturned}`,
+      `Never returned   ${diagnostics.casesNeverReturned}`,
       `Accepted         ${report.accepted.length}`,
       `Rejected         ${report.rejected}`,
       `Duplicates       ${report.duplicates}`,
+      "",
+      "Request outcomes (counted in requests):",
+      ...formatTally(diagnostics.requestOutcomes),
+      "",
+      "Case rejections (counted in returned candidates):",
+      ...formatTally(diagnostics.caseRejections),
+      ...(Object.keys(diagnostics.schemaIssues).length > 0
+        ? ["", "Schema failures by field:", ...formatTally(diagnostics.schemaIssues)]
+        : []),
+      "",
       `Corpus size      ${merged.length}`,
       `Splits assigned  ${Object.keys(assigned).length}`,
       `Tokens in / out  ${usage.inputTokens} / ${usage.outputTokens}`,
       `Estimated cost   ${usage.estimatedCostUsd === undefined ? `unavailable (unpriced: ${usage.unpricedModels.join(", ") || "no pricing configured"})` : `$${usage.estimatedCostUsd.toFixed(4)}${useBatch ? " (batch rate)" : ""}`}`,
+      `Diagnostics      ${diagnosticsPath}`,
     ].join("\n"),
   );
+
+  const lost =
+    diagnostics.requestOutcomes["truncated-salvaged"] +
+    diagnostics.requestOutcomes["truncated-empty"];
+  if (lost > 0) {
+    console.log(
+      `\n${lost} reply/replies hit the output ceiling. Complete cases were salvaged; lower --batch-size or raise OUTPUT_TOKENS_PER_CASE if this persists.`,
+    );
+  }
+  if (diagnostics.caseRejections["case-cap-reached"] > 0) {
+    console.log(
+      `\n${diagnostics.caseRejections["case-cap-reached"]} valid case(s) were discarded by EVAL_MAX_CASES after being paid for. Trim the plan instead.`,
+    );
+  }
+}
+
+function formatTally(tally: Record<string, number>): string[] {
+  const entries = Object.entries(tally).filter(([, count]) => count > 0);
+  if (entries.length === 0) return ["  (none)"];
+  const width = Math.max(...entries.map(([key]) => key.length));
+  return entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => `  ${key.padEnd(width)}  ${count}`);
+}
+
+/**
+ * Persists the rejection breakdown next to the run records. Without this the
+ * only trace of why a paid generation run yielded what it did is the console
+ * scrollback of the process that ran it.
+ */
+function writeDiagnostics(
+  diagnostics: GenerationDiagnostics,
+  extra: Record<string, unknown>,
+): string {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  const dir = path.join(process.cwd(), "evals", "results");
+  mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `${stamp}-generate.json`);
+  writeFileSync(
+    filePath,
+    JSON.stringify({ generatedAt: new Date().toISOString(), ...extra, diagnostics }, null, 2) + "\n",
+    "utf8",
+  );
+  return path.relative(process.cwd(), filePath);
 }
 
 main().catch((error: unknown) => {

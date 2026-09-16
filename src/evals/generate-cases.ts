@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { ModelClient } from "@/src/ai/client/anthropic";
 import type { BatchModelClient, PollOptions } from "@/src/ai/client/batch";
-import { extractJsonObject } from "@/src/ai/generation/json";
-import { caseGeneratorPromptV1 } from "@/src/ai/prompts/judges/case-generator-v1";
+import { extractJsonObject, salvageJsonArrayItems } from "@/src/ai/generation/json";
+import { ACTIVE_CASE_GENERATOR_PROMPT } from "@/src/ai/prompts/judges";
 import { evalCaseSchema, type EvalCase } from "@/src/schemas/eval-case";
 import { UsageTracker } from "./paid-guard";
 import { BATCH_DISCOUNT_MULTIPLIER } from "./pricing";
@@ -54,33 +54,53 @@ const CATEGORIES: EvalCase["category"][] = [
   "out-of-scope",
 ];
 
+const ORDINARY_DIFFICULTIES: EvalCase["difficulty"][] = ["easy", "medium"];
+const HARDER_DIFFICULTIES: EvalCase["difficulty"][] = ["medium", "hard"];
+
 /**
- * Builds a deterministic, diverse batch plan. Angles, categories and
- * difficulties rotate so the corpus is not hundreds of paraphrases.
+ * Builds a deterministic, diverse batch plan.
+ *
+ * Category, angle and difficulty are advanced on *different* periods. An
+ * earlier version indexed all three off the same counter, and because the
+ * category list and the angle list are both six long, the three were
+ * perfectly correlated: ordinary refund batches were always `easy` and always
+ * the "calm first-time customer" angle, so 25 ordinary batches asked six
+ * distinct questions four times over. The angle offset now advances once per
+ * full pass through the categories, which walks a Latin square of
+ * (category, angle) pairs instead of a single diagonal.
  */
 export function planBatches(
   targets: Record<BatchKind, number>,
   batchSize = 8,
 ): BatchSpec[] {
   const specs: BatchSpec[] = [];
-  const difficulties: EvalCase["difficulty"][] = ["easy", "medium", "hard"];
 
-  const build = (kind: BatchKind, angles: string[], total: number) => {
+  const build = (
+    kind: BatchKind,
+    angles: string[],
+    difficulties: EvalCase["difficulty"][],
+    total: number,
+  ) => {
     let remaining = total;
     let index = 0;
     while (remaining > 0) {
       const count = Math.min(batchSize, remaining);
+      // Which pass through the category list this batch belongs to.
+      const round = Math.floor(index / CATEGORIES.length);
       specs.push({
         kind,
         category:
           kind === "adversarial" && index % 2 === 0
             ? "prompt-injection"
-            : CATEGORIES[index % CATEGORIES.length]!,
-        difficulty:
-          kind === "ordinary"
-            ? difficulties[index % 2]!
-            : difficulties[(index % 2) + 1]!,
-        angle: angles[index % angles.length]!,
+            : // Adversarial batches alternate with prompt-injection, so they
+              // advance their category every other batch; otherwise every
+              // other category would never be reached.
+              CATEGORIES[
+                (kind === "adversarial" ? Math.floor(index / 2) : index) %
+                  CATEGORIES.length
+              ]!,
+        difficulty: difficulties[round % difficulties.length]!,
+        angle: angles[(index + round) % angles.length]!,
         count,
       });
       remaining -= count;
@@ -88,10 +108,58 @@ export function planBatches(
     }
   };
 
-  build("ordinary", ORDINARY_ANGLES, targets.ordinary);
-  build("edge", EDGE_ANGLES, targets.edge);
-  build("adversarial", ADVERSARIAL_ANGLES, targets.adversarial);
+  build("ordinary", ORDINARY_ANGLES, ORDINARY_DIFFICULTIES, targets.ordinary);
+  build("edge", EDGE_ANGLES, HARDER_DIFFICULTIES, targets.edge);
+  build(
+    "adversarial",
+    ADVERSARIAL_ANGLES,
+    HARDER_DIFFICULTIES,
+    targets.adversarial,
+  );
   return specs;
+}
+
+/** Total cases a plan asks for. */
+export function plannedCaseCount(specs: readonly BatchSpec[]): number {
+  return specs.reduce((total, spec) => total + spec.count, 0);
+}
+
+/**
+ * Trims a plan so it asks for at most `maxCases`.
+ *
+ * The case cap belongs here, before anything is submitted. Applying it only
+ * while ingesting results means paying for every planned case and discarding
+ * the overflow: the 2026-09-16 run billed 51 requests for 400 cases under
+ * `EVAL_MAX_CASES=60` and silently dropped every valid case past the 60th.
+ */
+export function trimPlanToCaseLimit(
+  specs: readonly BatchSpec[],
+  maxCases?: number,
+): BatchSpec[] {
+  if (maxCases === undefined) return [...specs];
+  const trimmed: BatchSpec[] = [];
+  let budget = maxCases;
+  for (const spec of specs) {
+    if (budget <= 0) break;
+    trimmed.push(spec.count <= budget ? spec : { ...spec, count: budget });
+    budget -= Math.min(spec.count, budget);
+  }
+  return trimmed;
+}
+
+/**
+ * Output ceiling for one batch request.
+ *
+ * A flat 2000 was used for every batch size. Eight real cases need roughly
+ * 1500 output tokens and the long tail needs more, so replies ran into the
+ * ceiling and were cut off. The ceiling costs nothing unless it is used, so
+ * it is now budgeted per case with room for the tail.
+ */
+export const OUTPUT_TOKENS_PER_CASE = 400;
+export const OUTPUT_TOKENS_OVERHEAD = 300;
+
+export function outputTokenBudget(spec: BatchSpec): number {
+  return OUTPUT_TOKENS_OVERHEAD + OUTPUT_TOKENS_PER_CASE * spec.count;
 }
 
 export function buildBatchPrompt(spec: BatchSpec): string {
@@ -115,78 +183,215 @@ export function buildBatchPrompt(spec: BatchSpec): string {
     "    }",
     "  ]",
     "}",
+    "",
+    `Return exactly ${spec.count} entries in "cases". Output JSON only.`,
   ].join("\n");
 }
 
 /** Stable id derived from the case text, so reruns do not duplicate cases. */
-export function synthenticCaseId(input: string): string {
+export function syntheticCaseId(input: string): string {
   return `gen-${createHash("sha256").update(input.trim().toLowerCase()).digest("hex").slice(0, 12)}`;
 }
+
+/** @deprecated Misspelling retained so existing imports keep working. */
+export const synthenticCaseId = syntheticCaseId;
 
 function normaliseKey(input: string): string {
   return input.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/** Why one returned candidate was not written to the corpus. */
+export type CaseRejectionReason =
+  | "missing-input-field"
+  | "schema-invalid"
+  | "duplicate-of-existing"
+  | "duplicate-within-run"
+  | "case-cap-reached";
+
+/** What became of one model request. Counted in requests, never in cases. */
+export type RequestOutcome =
+  | "complete"
+  | "truncated-salvaged"
+  | "truncated-empty"
+  | "unparseable"
+  | "no-cases-returned"
+  | "request-failed";
+
+export const CASE_REJECTION_REASONS: readonly CaseRejectionReason[] = [
+  "missing-input-field",
+  "schema-invalid",
+  "duplicate-of-existing",
+  "duplicate-within-run",
+  "case-cap-reached",
+];
+
+export const REQUEST_OUTCOMES: readonly RequestOutcome[] = [
+  "complete",
+  "truncated-salvaged",
+  "truncated-empty",
+  "unparseable",
+  "no-cases-returned",
+  "request-failed",
+];
+
+/**
+ * Where every planned case ended up.
+ *
+ * Request outcomes and case rejections are deliberately separate tallies.
+ * The previous report added a failed request's whole planned `count` to a
+ * single `rejected` number, so 36 unusable replies were reported as "288
+ * rejected candidates" even though not one of those candidates was ever
+ * received, let alone inspected. Requests are counted in requests and cases
+ * in cases, and `casesNeverReturned` names the gap outright.
+ */
+export type GenerationDiagnostics = {
+  promptId: string;
+  plannedCases: number;
+  requests: number;
+  requestOutcomes: Record<RequestOutcome, number>;
+  /** Array elements the model actually returned, before any validation. */
+  casesReturned: number;
+  /** Planned cases that never came back in any usable form. */
+  casesNeverReturned: number;
+  caseRejections: Record<CaseRejectionReason, number>;
+  /** Failing field path -> count, across every schema-invalid candidate. */
+  schemaIssues: Record<string, number>;
+};
+
+function emptyDiagnostics(plannedCases: number): GenerationDiagnostics {
+  return {
+    promptId: ACTIVE_CASE_GENERATOR_PROMPT.id,
+    plannedCases,
+    requests: 0,
+    requestOutcomes: Object.fromEntries(
+      REQUEST_OUTCOMES.map((key) => [key, 0]),
+    ) as Record<RequestOutcome, number>,
+    casesReturned: 0,
+    casesNeverReturned: 0,
+    caseRejections: Object.fromEntries(
+      CASE_REJECTION_REASONS.map((key) => [key, 0]),
+    ) as Record<CaseRejectionReason, number>,
+    schemaIssues: {},
+  };
+}
+
 type Ingest = {
+  /** Keys of the corpus on disk, so a repeat can be attributed to it. */
+  existing: Set<string>;
   seen: Set<string>;
   accepted: EvalCase[];
-  rejected: number;
-  duplicates: number;
+  diagnostics: GenerationDiagnostics;
+};
+
+export type IngestOptions = {
+  /** `"max_tokens"` is authoritative evidence that the reply was cut off. */
+  stopReason?: string;
+  maxCases?: number;
 };
 
 /**
  * Validates one batch response and folds accepted cases into the accumulator.
- * Invalid and duplicate rows are counted and discarded, never written.
+ *
+ * Complete cases are recovered even when the reply was cut off mid-case: the
+ * items are independent, and each one still has to pass `evalCaseSchema`
+ * afterwards. Nothing invalid is written; salvaging recovers text, it does
+ * not relax validation.
  */
 export function ingestBatchResponse(
   spec: BatchSpec,
   text: string | undefined,
   state: Ingest,
-  maxCases?: number,
-): void {
-  const payload = extractJsonObject(text ?? "") as { cases?: unknown[] } | undefined;
-  const rows = Array.isArray(payload?.cases) ? payload.cases : [];
-  if (rows.length === 0) {
-    state.rejected += spec.count;
-    return;
+  options: IngestOptions = {},
+): RequestOutcome {
+  const { stopReason, maxCases } = options;
+  const salvage = salvageJsonArrayItems(text ?? "", "cases");
+  const cutOff = salvage.truncated || stopReason === "max_tokens";
+
+  let outcome: RequestOutcome;
+  if (salvage.missing) {
+    outcome =
+      extractJsonObject(text ?? "") === undefined
+        ? "unparseable"
+        : "no-cases-returned";
+  } else if (salvage.items.length === 0) {
+    outcome = cutOff ? "truncated-empty" : "no-cases-returned";
+  } else {
+    outcome = cutOff ? "truncated-salvaged" : "complete";
   }
 
-  for (const row of rows) {
-    if (maxCases !== undefined && state.accepted.length >= maxCases) return;
+  state.diagnostics.requests += 1;
+  state.diagnostics.requestOutcomes[outcome] += 1;
+  state.diagnostics.casesReturned += salvage.items.length;
+
+  for (const row of salvage.items) {
+    if (maxCases !== undefined && state.accepted.length >= maxCases) {
+      state.diagnostics.caseRejections["case-cap-reached"] += 1;
+      continue;
+    }
     const candidate = row as { input?: unknown };
     if (typeof candidate.input !== "string") {
-      state.rejected += 1;
+      state.diagnostics.caseRejections["missing-input-field"] += 1;
       continue;
     }
     const key = normaliseKey(candidate.input);
     if (state.seen.has(key)) {
-      state.duplicates += 1;
+      state.diagnostics.caseRejections[
+        state.existing.has(key) ? "duplicate-of-existing" : "duplicate-within-run"
+      ] += 1;
       continue;
     }
 
     const parsed = evalCaseSchema.safeParse({
       ...(row as object),
-      id: synthenticCaseId(candidate.input),
+      id: syntheticCaseId(candidate.input),
       category: spec.category,
       adversarial: spec.kind === "adversarial",
       difficulty: spec.difficulty,
       source: "synthetic",
     });
     if (!parsed.success) {
-      state.rejected += 1;
+      state.diagnostics.caseRejections["schema-invalid"] += 1;
+      for (const issue of parsed.error.issues) {
+        const path = issue.path.join(".") || "(root)";
+        const label = `${path}: ${issue.code}`;
+        state.diagnostics.schemaIssues[label] =
+          (state.diagnostics.schemaIssues[label] ?? 0) + 1;
+      }
       continue;
     }
     state.seen.add(key);
     state.accepted.push(parsed.data);
   }
+
+  return outcome;
 }
 
 export type GenerationReport = {
   accepted: EvalCase[];
+  /** Candidates received and thrown out on their merits. */
   rejected: number;
   duplicates: number;
   batches: number;
+  diagnostics: GenerationDiagnostics;
 };
+
+function finalise(state: Ingest, batches: number): GenerationReport {
+  const { caseRejections } = state.diagnostics;
+  state.diagnostics.casesNeverReturned = Math.max(
+    0,
+    state.diagnostics.plannedCases - state.diagnostics.casesReturned,
+  );
+  return {
+    accepted: state.accepted,
+    rejected:
+      caseRejections["missing-input-field"] + caseRejections["schema-invalid"],
+    duplicates:
+      caseRejections["duplicate-of-existing"] +
+      caseRejections["duplicate-within-run"],
+    batches,
+    diagnostics: state.diagnostics,
+  };
+}
 
 export type GenerateOptions = {
   client: ModelClient;
@@ -199,16 +404,17 @@ export type GenerateOptions = {
 
 /**
  * Calls the generation model batch by batch, validating every case before it
- * is accepted. Invalid or duplicate cases are counted and discarded.
+ * is accepted. Invalid and duplicate cases are counted by reason, never written.
  */
 export async function generateSyntheticCases(
   options: GenerateOptions,
 ): Promise<GenerationReport> {
+  const existingKeys = new Set(options.existing.map((c) => normaliseKey(c.input)));
   const state: Ingest = {
-    seen: new Set(options.existing.map((c) => normaliseKey(c.input))),
+    existing: existingKeys,
+    seen: new Set(existingKeys),
     accepted: [],
-    rejected: 0,
-    duplicates: 0,
+    diagnostics: emptyDiagnostics(plannedCaseCount(options.specs)),
   };
   let batches = 0;
 
@@ -217,25 +423,23 @@ export async function generateSyntheticCases(
     options.usage.assertWithinBudget();
 
     const result = await options.client.complete({
-      system: caseGeneratorPromptV1.systemPrompt,
+      system: ACTIVE_CASE_GENERATOR_PROMPT.systemPrompt,
       userContent: buildBatchPrompt(spec),
-      maxOutputTokens: 2000,
+      maxOutputTokens: outputTokenBudget(spec),
       // Varied cases, not reproducible ones; dropped where unsupported.
       temperature: 1,
     });
     options.usage.record(result.model, result.inputTokens, result.outputTokens);
     batches += 1;
 
-    ingestBatchResponse(spec, result.text, state, options.maxCases);
+    ingestBatchResponse(spec, result.text, state, {
+      stopReason: result.stopReason,
+      maxCases: options.maxCases,
+    });
     options.onProgress?.(batches, options.specs.length, state.accepted.length);
   }
 
-  return {
-    accepted: state.accepted,
-    rejected: state.rejected,
-    duplicates: state.duplicates,
-    batches,
-  };
+  return finalise(state, batches);
 }
 
 export type GenerateBatchOptions = {
@@ -260,11 +464,12 @@ export type GenerateBatchOptions = {
 export async function generateSyntheticCasesBatch(
   options: GenerateBatchOptions,
 ): Promise<GenerationReport & { batchId: string }> {
+  const existingKeys = new Set(options.existing.map((c) => normaliseKey(c.input)));
   const state: Ingest = {
-    seen: new Set(options.existing.map((c) => normaliseKey(c.input))),
+    existing: existingKeys,
+    seen: new Set(existingKeys),
     accepted: [],
-    rejected: 0,
-    duplicates: 0,
+    diagnostics: emptyDiagnostics(plannedCaseCount(options.specs)),
   };
 
   // custom_id must be unique within a batch, and maps back to its spec.
@@ -277,9 +482,9 @@ export async function generateSyntheticCasesBatch(
     batchId = await options.client.submit(
       [...specById.entries()].map(([customId, spec]) => ({
         customId,
-        system: caseGeneratorPromptV1.systemPrompt,
+        system: ACTIVE_CASE_GENERATOR_PROMPT.systemPrompt,
         userContent: buildBatchPrompt(spec),
-        maxOutputTokens: 2000,
+        maxOutputTokens: outputTokenBudget(spec),
         // Varied cases, not reproducible ones; dropped where unsupported.
         temperature: 1,
       })),
@@ -302,17 +507,15 @@ export async function generateSyntheticCasesBatch(
     const spec = specById.get(result.customId);
     if (!spec) continue;
     if (result.error !== undefined) {
-      state.rejected += spec.count;
+      state.diagnostics.requests += 1;
+      state.diagnostics.requestOutcomes["request-failed"] += 1;
       continue;
     }
-    ingestBatchResponse(spec, result.text, state, options.maxCases);
+    ingestBatchResponse(spec, result.text, state, {
+      stopReason: result.stopReason,
+      maxCases: options.maxCases,
+    });
   }
 
-  return {
-    accepted: state.accepted,
-    rejected: state.rejected,
-    duplicates: state.duplicates,
-    batches: results.length,
-    batchId,
-  };
+  return { ...finalise(state, results.length), batchId };
 }

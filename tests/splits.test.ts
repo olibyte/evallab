@@ -3,6 +3,7 @@ import { InvalidEvalDataError, loadDatasets } from "../src/evals/dataset";
 import { DATASET_PRESETS } from "../src/evals/datasets-config";
 import {
   assignSplits,
+  DEV_FRACTION,
   emptyManifest,
   loadSplitManifest,
   selectRepresentative,
@@ -32,10 +33,33 @@ describe("committed split manifest", () => {
     expect(summary.unassigned).toBe(0);
   });
 
-  it("matches what the deterministic assignment would produce from scratch", () => {
-    // Guards against hand edits that move a case between splits.
-    const { manifest: rebuilt } = assignSplits(committed, emptyManifest());
-    expect(rebuilt.assignments).toEqual(manifest.assignments);
+  it("is frozen: reassigning the committed corpus moves nothing", () => {
+    // Assignments are frozen by design, so a from-scratch rebuild is NOT the
+    // invariant: adding cases to a group re-sorts it and would reassign the
+    // cases already in it. What must hold is that running `pnpm eval:splits`
+    // again is a no-op.
+    const { manifest: reassigned, assigned } = assignSplits(committed, manifest);
+    expect(assigned).toEqual({});
+    expect(reassigned.assignments).toEqual(manifest.assignments);
+  });
+
+  it("keeps each (category, adversarial) group near its dev fraction", () => {
+    // Guards against hand edits that move a case between splits, which
+    // freezing alone cannot catch.
+    const groups = new Map<string, EvalCase[]>();
+    for (const evalCase of committed) {
+      const key = `${evalCase.category}|${evalCase.adversarial}`;
+      groups.set(key, [...(groups.get(key) ?? []), evalCase]);
+    }
+    for (const [key, group] of groups) {
+      const target = group[0]!.adversarial
+        ? DEV_FRACTION.adversarial
+        : DEV_FRACTION.ordinary;
+      const dev = group.filter((c) => manifest.assignments[c.id] === "dev").length;
+      // One case of slack per assignment pass the group has been through.
+      const slack = 2 / group.length;
+      expect(Math.abs(dev / group.length - target)).toBeLessThanOrEqual(slack);
+    }
   });
 
   it("keeps adversarial cases out of heldout and ordinary cases out of adversarial-holdout", () => {

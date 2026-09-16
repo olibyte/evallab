@@ -29,7 +29,8 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Automated quality score
 
 ## Phase 4 - Durable eval assets
-- [x] `pnpm eval:generate` (implemented; a real generated corpus is BLOCKED on credentials)
+- [x] `pnpm eval:generate` (implemented; first paid run 2026-09-16 yielded 60
+      of 400 planned cases - causes fixed, see the post-mortem section below)
 - [x] `pnpm eval:run`
 - [x] `pnpm eval:compare`
 - [x] `pnpm prompt:optimize`
@@ -115,6 +116,27 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       tests assert on the payloads reaching the SDK
 - [ ] Human verification of synthetic case labels once `generated.jsonl`
       exists (labels are written by the runtime model under test)
+
+## Synthetic generation post-mortem (run of 2026-09-16)
+- [x] Surface `stopReason` on `ModelCallResult` and `BatchItemResult` so a
+      reply cut off at the output ceiling is distinguishable from a malformed one
+- [x] Budget the output ceiling per case (`outputTokenBudget`) instead of a
+      flat 2000 for any batch size
+- [x] Salvage the complete cases from a truncated reply
+      (`salvageJsonArrayItems`); each one still passes `evalCaseSchema`
+- [x] Count request outcomes in requests and case rejections in candidates;
+      stop adding a failed reply's planned count to `rejected`
+- [x] Report schema failures by field path
+- [x] Persist the breakdown to `evals/results/<stamp>-generate.json`
+- [x] Apply `EVAL_MAX_CASES` to the plan before submission
+      (`trimPlanToCaseLimit`), not to results already paid for
+- [x] Decorrelate category, angle and difficulty in `planBatches`; adversarial
+      batches now reach all seven categories
+- [x] `case-generator-v2` with an explicit, length-bounded output contract
+      (v1 retained)
+- [ ] Regenerate the synthetic corpus under the fixed plan (BLOCKED: paid).
+      The committed 60 cases came from ~8 distinct prompts under the collapsed
+      plan, so the corpus is narrower than its size suggests.
 
 ## Outstanding follow-ups
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling

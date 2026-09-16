@@ -1,16 +1,18 @@
 # BUILD STATE
 
 Current phase: Phases 0-11 implemented, Batch API support, a benchmark
-methodology review, Claude 5 API compatibility applied, and live model access
-verified; the paid eval programme and deployment work are outstanding
+methodology review, Claude 5 API compatibility applied, live model access
+verified, and the first paid synthetic generation run diagnosed and fixed;
+the rest of the paid eval programme and deployment work are outstanding
 Current branch: main
 Last known green commit: see `git log -1` (the working tree on top of it was
 validated as below and is not yet committed)
 Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
-(184 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
-(24 cases, offline), `pnpm eval:splits --check` all pass. A live two-case
-sequential run against `claude-sonnet-5` and `claude-opus-5` also passed
-(see below).
+(198 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
+(24 cases, offline), `pnpm eval:splits --check` (116 assigned) all pass. A
+live two-case sequential run against `claude-sonnet-5` and `claude-opus-5`
+also passed (see below). No paid call was made while diagnosing the
+generation run; `ALLOW_PAID_EVALS` stayed `false`.
 
 ## Completed
 
@@ -57,6 +59,17 @@ sequential run against `claude-sonnet-5` and `claude-opus-5` also passed
   artifact. It confirms that billing works, that the Claude 5 call paths no
   longer 400 on sampling parameters, and that `judge-rubric-v2` has now been
   validated against a live model end to end.
+- Synthetic generation post-mortem (2026-09-16): the first paid
+  `eval:generate` run submitted 51 batch requests for 400 planned cases and
+  kept 60, at $0.5433. Root causes, all fixed and covered by
+  `tests/generation-diagnostics.test.ts`: a flat `max_tokens: 2000` truncated
+  most replies; `extractJsonObject` discarded the complete cases beside the
+  cut-off one; `rejected` was incremented by a failed reply's *planned* count,
+  which is where "288 rejected" and "348 returned" came from; `EVAL_MAX_CASES`
+  was applied after the cases were paid for, silently dropping 52; and
+  `planBatches` indexed category, angle and difficulty off one counter so the
+  plan collapsed to ~8 distinct prompts. `eval:generate` now prints and
+  persists a rejection breakdown. Details in `docs/DECISIONS.md`.
 
 ## Outstanding paid work
 
@@ -66,7 +79,7 @@ opts in explicitly and stays bounded by `EVAL_MAX_SPEND_USD`.
 
 Still to run against a live model:
 
-- synthetic corpus generation
+- synthetic corpus generation (ran once, under-delivered; see the post-mortem)
 - prompt optimization (candidate search, dev split only)
 - held-out benchmark
 - adversarial-holdout benchmark
@@ -91,6 +104,10 @@ pnpm eval:run --dataset human --max-cases 6              # offline, no cost
 pnpm eval:run --dataset seed --mode live --max-cases 2 --execution sequential
 
 # 4. Corpus, then splits are assigned automatically for the new cases.
+#    RAN 2026-09-16 and under-delivered (60 of 400); causes fixed since.
+#    Unset EVAL_MAX_CASES first or the plan is trimmed to it, and check the
+#    printed rejection breakdown before trusting the yield.
+pnpm eval:generate --plan --ordinary 200 --edge 100 --adversarial 100
 pnpm eval:generate --ordinary 200 --edge 100 --adversarial 100
 pnpm eval:splits --check
 
@@ -121,23 +138,43 @@ configured. `pnpm build` passes; deployment steps are documented in the README.
 
 None.
 
+## Open questions from the generation post-mortem
+
+- The 60 committed synthetic cases were produced under the collapsed plan, so
+  they cover roughly eight distinct prompts. They are valid and their splits
+  are frozen, but the corpus is narrower than 60 suggests. Regenerating is a
+  paid operation and has not been run.
+- `.env` currently sets `ANTHROPIC_MODEL=claude-haiku-4-5-20251001` and
+  `EVAL_MAX_CASES=60`, neither of which matches the documented paid sequence
+  (`claude-sonnet-5`, no case cap). The $0.5433 cost of the generation run is
+  consistent with Sonnet 5 at the Batch API rate, not with Haiku at that rate,
+  so `.env` was most likely changed after the run. Confirm which model
+  produced `generated.jsonl` before quoting the corpus provenance anywhere.
+
 ## Next recommended task
 
-1. Commit the Claude 5 compatibility fix (the working tree is validated but
-   uncommitted; `.agents/`, `.claude/` and `skills-lock.json` stay out).
-2. Run the remaining paid sequence above from step 4 onward and commit
-   `evals/datasets/generated.jsonl`, `evals/datasets/splits.json` and the
-   `evals/benchmarks/` artifacts. Then review a sample of synthetic case
-   labels by hand; they are written by the model under test.
+1. Commit the Claude 5 compatibility fix and the generation post-mortem fixes
+   (the working tree is validated but uncommitted; `.agents/`, `.claude/` and
+   `skills-lock.json` stay out).
+2. Decide whether to regenerate the synthetic corpus under the fixed plan
+   before benchmarking. The existing 60 cases are usable but narrow, and the
+   run that produced them cost $0.5433 for what should now cost about the
+   same and yield several hundred. Then run the remaining paid sequence from
+   step 4 onward and commit `evals/datasets/generated.jsonl`,
+   `evals/datasets/splits.json` and the `evals/benchmarks/` artifacts. Review
+   a sample of synthetic case labels by hand; they are written by the model
+   under test.
 3. Independently of the paid work, implement the persistent `UsageStore` backed by `DATABASE_URL`
    so public live inference can be enabled safely on multi-instance hosting.
 
 ## Relevant notes
 
-- Splits are frozen in `evals/datasets/splits.json` (dev 28, heldout 16,
-  adversarial-holdout 12 over the 56 human cases). Adding a human case
-  requires `pnpm eval:splits`; a test asserts the manifest matches the
-  deterministic assignment and covers every case.
+- Splits are frozen in `evals/datasets/splits.json` (dev 61, heldout 33,
+  adversarial-holdout 22 over 56 human and 60 synthetic cases). Adding a case
+  requires `pnpm eval:splits`. Because assignment is incremental and frozen, a
+  from-scratch rebuild does *not* reproduce the manifest once a group has
+  grown; the tests assert reassignment is a no-op and that each group stays
+  near its dev fraction instead. See `docs/DECISIONS.md`.
 - Sampling parameters are omitted, not defaulted: `claude-sonnet-5` and
   `claude-opus-5` reject `temperature`, `top_p` and `top_k` with a 400, and
   use adaptive thinking rather than `budget_tokens`. Eval runs still ask for

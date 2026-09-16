@@ -17,7 +17,7 @@ export function fakeBatchClient(
   respond: (
     request: BatchRequest,
     attempt: number,
-  ) => { text?: string; error?: string },
+  ) => { text?: string; error?: string; stopReason?: string },
   submitted: SubmittedBatch[] = [],
 ): BatchModelClient & { submitted: SubmittedBatch[] } {
   const pending = new Map<string, BatchRequest[]>();
@@ -49,6 +49,7 @@ export function fakeBatchClient(
           customId: request.customId,
           text: outcome.text,
           error: outcome.error,
+          stopReason: outcome.stopReason,
           inputTokens: outcome.text ? 120 : 0,
           outputTokens: outcome.text ? 60 : 0,
         };

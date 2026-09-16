@@ -317,3 +317,104 @@ process. Benchmark methodology and model selection are unchanged.
 `tests/model-compat.test.ts` asserts on the payloads that reach the SDK, so a
 reintroduced `temperature`, `top_p`, `top_k` or `thinking` field fails
 offline instead of on the first paid call.
+
+## 2026-09-16 - Synthetic generation: truncation, salvage and honest rejection counts
+
+**Decision.** Six changes to `eval:generate`, following a post-mortem of the
+first paid generation run (51 batch requests, 60 cases accepted, 288 reported
+rejected, $0.5433):
+
+1. `ModelCallResult` and `BatchItemResult` carry `stopReason`, so a reply cut
+   off by the output ceiling is distinguishable from a malformed one.
+2. `salvageJsonArrayItems` recovers the complete elements of a named JSON
+   array from text that stopped mid-value. `ingestBatchResponse` uses it;
+   every recovered element still has to pass `evalCaseSchema`.
+3. The output ceiling is budgeted per case (`outputTokenBudget`: 300 + 400
+   per case) instead of a flat 2000 for any batch size.
+4. `GenerationReport` carries `GenerationDiagnostics`: request outcomes
+   counted in requests, case rejections counted in candidates, schema
+   failures by field path, and `casesNeverReturned`. `eval:generate` prints
+   the breakdown and writes it to `evals/results/<stamp>-generate.json`.
+5. `EVAL_MAX_CASES` trims the plan before submission (`trimPlanToCaseLimit`)
+   rather than discarding results after they are paid for.
+6. `planBatches` advances category, angle and difficulty on different periods.
+7. `case-generator-v2` is the active generator prompt; v1 is retained.
+
+**Why.** The run's own numbers did not add up, and the code was the reason.
+
+*Truncation was the primary cause.* `max_tokens` was a flat 2000. Eight real
+cases need roughly 1500 output tokens and the tail needs more, so replies ran
+into the ceiling. The cost confirms it: at the Batch API rate for
+`claude-sonnet-5` ($1/$5 per million), 51 requests at roughly 1000 input
+tokens leave $0.4923 of the $0.5433 as output, which is 98,460 tokens, or
+1930 of the 2000-token ceiling per request. The same figure follows from
+`claude-haiku-4-5-20251001` at the standard rate, so the conclusion does not
+depend on which model was configured. The only reading that avoids truncation
+is Sonnet at the *standard* rate, which contradicts the run being executed as
+batch requests.
+
+*The parser then threw away the good cases beside the bad one.*
+`extractJsonObject` parses all-or-nothing, so one unterminated case destroyed
+the seven complete ones in the same reply. Salvage is safe here because the
+array holds independent items that are each validated afterwards. It is
+deliberately not applied on the support-response path, where a partial object
+is a partial answer to a customer and must stay a hard failure.
+
+*The report then invented candidates that never existed.* A reply with no
+parseable cases did `rejected += spec.count`, adding eight *planned* cases to
+a counter that otherwise holds *received* candidates. 288 is exactly 36 x 8:
+36 unusable replies, reported as 288 rejected candidates, none of which was
+ever received. That is also why "348 candidates returned" does not appear
+anywhere in the pipeline - it is `accepted + rejected`, two numbers in
+different units. Requests are now counted in requests and cases in cases.
+
+*The case cap was applied after payment.* `EVAL_MAX_CASES=60` was enforced
+while ingesting results, and the ingest loop returned early without counting.
+The run submitted 51 requests for 400 cases and stopped accepting at 60; the
+52 cases that were received, valid and past the cap were dropped with no
+counter at all. That is the missing 400 - 348.
+
+*The plan had collapsed.* Category, angle and difficulty were all indexed off
+one counter with periods 6, 6 and 2, so the three were perfectly correlated:
+an ordinary refund batch was always `easy` and always the "calm first-time
+customer" angle. The 25 ordinary batches asked six distinct questions four
+times over. Adversarial batches took `prompt-injection` on even indices,
+which aliased against the same six-long category rotation, so only three of
+the other categories were ever reachable. Ordinary batches now produce 25
+distinct (category, difficulty, angle) triples instead of 6, and adversarial
+batches reach all seven categories instead of four.
+
+**Alternatives considered.** Reducing `--batch-size` alone: it lowers the odds
+of truncation without detecting it, and truncation would still silently
+discard whole batches. Relaxing `evalCaseSchema` or accepting cases without
+`expectedBehaviour`: that buys yield by lowering the bar, which the yield
+problem never justified. Repairing truncated JSON by appending closing
+brackets: that guesses at an incomplete value, where scanning for complete
+elements does not.
+
+**Consequences.** The 60 cases in `evals/datasets/generated.jsonl` came from
+roughly eight distinct prompts under the collapsed plan, so the corpus is
+narrower than 60 cases suggests, and its splits are frozen. Regenerating is a
+paid operation and has not been run. No number in this entry comes from a new
+model call: the diagnosis is arithmetic over the reported totals plus offline
+replay of the failure shape against the committed corpus.
+
+## 2026-09-16 - Split manifests are frozen, so rebuild-equality is not the invariant
+
+**Decision.** `tests/splits.test.ts` no longer asserts that a from-scratch
+`assignSplits` over the whole corpus reproduces the committed manifest. It
+asserts instead that reassigning the committed corpus is a no-op, and that
+each (category, adversarial) group stays near its configured dev fraction.
+
+**Why.** The two assertions were incompatible by construction. Assignment is
+incremental and frozen: a case is assigned once and never moves. Adding 60
+synthetic cases to existing groups re-sorts those groups by `sha256(id)` and
+re-applies the interleave, so a from-scratch rebuild reassigns human cases
+that are already frozen. The old test passed only while the corpus had been
+assigned in exactly one pass, and failed the moment the first synthetic cases
+landed. `PROJECT_SPEC.md` and the 2026-09-16 splits decision both make
+freezing the requirement, so the test was the stale side.
+
+**Consequences.** The test's original purpose - catching a hand edit that
+moves a case between splits - is now served by the dev-fraction bound rather
+than by rebuild equality, which is a weaker but still meaningful check.
