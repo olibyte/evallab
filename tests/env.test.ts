@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_GENERATION_MODEL,
+  DEFAULT_JUDGE_MODEL,
+  getEnv,
   getRuntimeMode,
   hasLiveJudgeCredentials,
   isPublicLiveInferenceEnabled,
@@ -27,9 +30,11 @@ describe("runtime mode", () => {
     expect(getRuntimeMode()).toBe("replay-only");
   });
 
-  it("is replay-only when a key exists but no generation model is configured", () => {
+  it("is live on a key alone, because both models default", () => {
     setEnv({ ANTHROPIC_API_KEY: "sk-test" });
-    expect(getRuntimeMode()).toBe("replay-only");
+    expect(getRuntimeMode()).toBe("live");
+    expect(getEnv().ANTHROPIC_MODEL).toBe(DEFAULT_GENERATION_MODEL);
+    expect(getEnv().ANTHROPIC_JUDGE_MODEL).toBe(DEFAULT_JUDGE_MODEL);
   });
 
   it("is live when a key and generation model are configured", () => {
@@ -39,16 +44,24 @@ describe("runtime mode", () => {
 });
 
 describe("judge configuration", () => {
-  it("is independent of the generation model", () => {
-    setEnv({ ANTHROPIC_API_KEY: "sk-test", ANTHROPIC_MODEL: "claude-test" });
-    expect(hasLiveJudgeCredentials()).toBe(false);
+  it("defaults to a more capable model than the generator", () => {
+    setEnv({});
+    expect(DEFAULT_JUDGE_MODEL).not.toBe(DEFAULT_GENERATION_MODEL);
+  });
 
+  it("is overridable independently of the generation model", () => {
     setEnv({
       ANTHROPIC_API_KEY: "sk-test",
-      ANTHROPIC_MODEL: "claude-test",
-      ANTHROPIC_JUDGE_MODEL: "claude-judge",
+      ANTHROPIC_JUDGE_MODEL: "claude-judge-override",
     });
+    expect(getEnv().ANTHROPIC_MODEL).toBe(DEFAULT_GENERATION_MODEL);
+    expect(getEnv().ANTHROPIC_JUDGE_MODEL).toBe("claude-judge-override");
     expect(hasLiveJudgeCredentials()).toBe(true);
+  });
+
+  it("needs a key, not just a model", () => {
+    setEnv({ ANTHROPIC_JUDGE_MODEL: "claude-judge" });
+    expect(hasLiveJudgeCredentials()).toBe(false);
   });
 });
 

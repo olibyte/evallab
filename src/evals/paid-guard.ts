@@ -46,12 +46,25 @@ export class UsageTracker {
   private spendUsd = 0;
   private pricingAvailable = false;
 
-  constructor(private readonly maxSpendUsd?: number) {}
+  /**
+   * `discountMultiplier` lets a batch run bill at the Batch API rate without
+   * every call site knowing about batching.
+   */
+  constructor(
+    private readonly maxSpendUsd?: number,
+    private readonly discountMultiplier = 1,
+  ) {}
 
   record(model: string, inputTokens: number, outputTokens: number): void {
     this.inputTokens += inputTokens;
     this.outputTokens += outputTokens;
-    const cost = estimateCostUsd(model, inputTokens, outputTokens);
+    const cost = estimateCostUsd(
+      model,
+      inputTokens,
+      outputTokens,
+      undefined,
+      this.discountMultiplier,
+    );
     if (cost !== undefined) {
       this.pricingAvailable = true;
       this.spendUsd += cost;

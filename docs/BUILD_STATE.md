@@ -1,10 +1,11 @@
 # BUILD STATE
 
-Current phase: Phases 0-11 implemented; paid and deployment work outstanding
+Current phase: Phases 0-11 implemented plus Batch API support; paid and
+deployment work outstanding
 Current branch: main
 Last known green commit: see `git log -1` (all commits below were validated)
 Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
-(103 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
+(120 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
 (24 cases, offline) all pass.
 
 ## Completed
@@ -28,31 +29,58 @@ Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
   CI that needs no paid model access
 - Phase 11: README with architecture diagram, methodology, limitations and
   deployment steps
+- Model configuration: defaults centralised in `src/config/env.ts`
+  (`claude-sonnet-5` generation, `claude-opus-5` judge), both overridable by
+  environment. No model id is hard-coded elsewhere.
+- Pricing: `evals/pricing.json` carries current Anthropic rates, so
+  `EVAL_MAX_SPEND_USD` now enforces against real tracked spend.
+- Batch API: `src/ai/client/batch.ts` plus `src/evals/batch-execution.ts`.
+  `eval:run`, `eval:generate` and `prompt:optimize` all accept
+  `--execution batch`, or default to it with `EVAL_USE_BATCH_API=true`.
+  Batch runs are costed at the 50% rate. Covered by 20 tests against a fake
+  batch client; never used on the `/api/respond` request path.
 
 ## Blocked
 
-**Paid Anthropic work** - no `ANTHROPIC_API_KEY` in this environment and
-`ALLOW_PAID_EVALS` is unset. Blocked: a real synthetic corpus, any live
-experiment run, real benchmark artifacts, recorded replay fixtures, prompt
-candidate search. All the code paths exist and are covered by tests with
-mocked clients.
+**Paid Anthropic work** - the key authenticates, but the Anthropic *Console*
+credit balance is empty, so every Messages API call returns
+`400 invalid_request_error: Your credit balance is too low`. This is a
+different billing pool from a claude.ai Pro subscription; Pro usage credits do
+not fund the API. `ALLOW_PAID_EVALS` is deliberately `false`.
+
+Blocked: a real synthetic corpus, any live experiment run, real benchmark
+artifacts, recorded replay fixtures, prompt candidate search. All the code
+paths exist and are covered by tests against fake sequential and batch
+clients.
 
 Exact commands once credentials exist:
 
 ```bash
+# 1. Add credit at console.anthropic.com -> Billing (NOT claude.ai).
 export ANTHROPIC_API_KEY=...
-export ANTHROPIC_MODEL=...
-export ANTHROPIC_JUDGE_MODEL=...
 export ALLOW_PAID_EVALS=true
-export EVAL_MAX_CASES=60
+export EVAL_MAX_SPEND_USD=25          # enforced against real tracked spend
+export EVAL_USE_BATCH_API=true        # half cost, queued not real-time
 
-pnpm eval:generate --plan                 # free: inspect the batch plan
+# 2. Free sanity checks first.
+pnpm eval:generate --plan             # prints the batch plan, calls nothing
+pnpm eval:run --dataset human --max-cases 6   # offline, no cost
+
+# 3. Smallest possible live call, to confirm billing works.
+pnpm eval:run --dataset seed --mode live --max-cases 2 --execution sequential
+
+# 4. Then the real workloads.
 pnpm eval:generate --ordinary 200 --edge 100 --adversarial 100
 pnpm eval:run --dataset human --mode live
 pnpm eval:compare --list
 pnpm eval:compare <baseline-run-id> <candidate-run-id> --write-benchmark
 pnpm prompt:optimize --dataset human --candidates 4
 ```
+
+Models default to `claude-sonnet-5` (generation) and `claude-opus-5` (judge);
+set `ANTHROPIC_MODEL` / `ANTHROPIC_JUDGE_MODEL` only to override. Retired ids
+such as `claude-3-5-sonnet-20240620` will fail — `GET /v1/models` lists what a
+key can reach.
 
 **Deployment** - `ALLOW_DEPLOY` is unset and no Vercel credentials are
 configured. `pnpm build` passes; deployment steps are documented in the README.
@@ -74,6 +102,8 @@ None.
 
 - Offline runs deliberately produce no rubric scores; rubric gates report "no
   measurement" rather than passing. See `docs/DECISIONS.md`.
+- A batch run produces identical case results to a sequential one; only cost,
+  latency and `config.execution` differ. Tests assert this.
 - `evals/benchmarks/latest.json` does not exist yet and must never be created
   by hand.
 - `.agents/`, `.claude/` and `skills-lock.json` are untracked user tooling and

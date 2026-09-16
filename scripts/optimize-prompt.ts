@@ -27,11 +27,16 @@ Usage: pnpm prompt:optimize [options]
   --prompt <id>       parent prompt id                  (default: active prompt)
   --baseline <runId>  reuse an existing baseline run instead of running one
   --candidates <n>    candidates to propose, 3-5        (default: 4)
+  --execution <how>   sequential | batch                (default: sequential)
   --max-cases <n>     cap cases per run
   --help
 
 This is a paid batch operation: it requires ALLOW_PAID_EVALS=true.
 It never modifies the active production prompt.
+
+An optimization run evaluates the baseline plus every candidate over the
+whole dataset, so it is the heaviest workload here. Batch execution halves
+the cost of those runs; EVAL_USE_BATCH_API=true makes it the default.
 `.trim();
 
 async function main() {
@@ -56,21 +61,35 @@ async function main() {
     Math.max(3, numberArg(args, "candidates") ?? 4),
   );
 
+  const requestedExecution = args.values.get("execution");
+  const execution: "sequential" | "batch" =
+    requestedExecution === "batch" ||
+    (requestedExecution === undefined && env.EVAL_USE_BATCH_API)
+      ? "batch"
+      : "sequential";
+
   const usage = new UsageTracker(env.EVAL_MAX_SPEND_USD);
   const runConfig = {
     cases,
     datasetId,
     datasetFiles: files,
     mode: "live" as const,
+    execution,
     maxCases,
     maxSpendUsd: env.EVAL_MAX_SPEND_USD,
+    onBatchProgress: (stage: string, status: string, counts: Record<string, number>) =>
+      console.log(
+        `  [${stage}] ${status} - ${Object.entries(counts)
+          .map(([key, value]) => `${key}=${value}`)
+          .join(" ")}`,
+      ),
   };
 
   const baselineRunId = args.values.get("baseline");
   const baseline = baselineRunId
     ? loadRun(baselineRunId)
     : await (async () => {
-        console.log(`Running baseline for ${prompt.id}...`);
+        console.log(`Running baseline for ${prompt.id} (${execution})...`);
         const run = await runExperiment({ ...runConfig, prompt });
         saveRun(run);
         return run;

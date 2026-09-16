@@ -106,3 +106,47 @@ and excluded from commits. They are excluded from ESLint.
 
 **Why.** They are user-installed tooling, not project source, but whether they
 belong in this repository is the maintainer's call, not the agent's.
+
+## 2026-09-16 - Model defaults centralised, judge stronger than generator
+
+**Decision.** `src/config/env.ts` defines `DEFAULT_GENERATION_MODEL =
+"claude-sonnet-5"` and `DEFAULT_JUDGE_MODEL = "claude-opus-5"`. Both are
+overridable by `ANTHROPIC_MODEL` / `ANTHROPIC_JUDGE_MODEL`. Live mode now
+turns on with an API key alone, since both roles resolve.
+
+**Why.** The spec forbids hard-coding a model *throughout* the codebase, not
+having one default in the configuration module. The previously configured ids
+(`claude-3-5-sonnet-20240620`, `claude-3-5-haiku-20240307`) were retired and
+would have failed at the first call. A judge from the same family as the
+generator is prone to self-preference bias, so the judge defaults one tier
+above the generator.
+
+## 2026-09-16 - Pricing populated; cost enforcement is now real
+
+**Decision.** `evals/pricing.json` carries current Anthropic rates: Sonnet 5
+$2/$10, Opus 5 $5/$25, Haiku 4.5 $1/$5 per million input/output tokens. A
+model with no entry is still reported as unpriced rather than free.
+
+**Why.** `EVAL_MAX_SPEND_USD` was inert without pricing. Rates live in one
+data file rather than in code so they can be corrected without a release, and
+the "unpriced, not free" rule still prevents a silent zero.
+
+## 2026-09-16 - Batch API for offline runs only
+
+**Decision.** `src/ai/client/batch.ts` wraps Message Batches behind a
+`BatchModelClient` interface. `eval:run`, `eval:generate` and
+`prompt:optimize` accept `--execution batch` and honour `EVAL_USE_BATCH_API`.
+`eval:run` submits a generation batch, a retry batch for malformed output,
+then a judge batch. Batch usage is costed at 50%. `/api/respond` never
+batches.
+
+**Why.** Batches halve the cost of the full 400-500 case corpus, which matters
+on a fixed credit balance. They are queued rather than real-time, so they are
+wrong for a public demo request. A separate interface keeps the sequential
+path unchanged and lets both be tested against fakes; tests assert the two
+paths produce identical case results.
+
+**Known gaps.** Batches above the 100,000-request limit are refused with a
+clear error rather than chunked, and a batch that outlives its poll timeout
+must currently be collected by hand (the error prints the batch id). Both are
+recorded in `docs/TASKS.md`.

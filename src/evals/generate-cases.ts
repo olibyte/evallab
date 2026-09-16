@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ModelClient } from "@/src/ai/client/anthropic";
+import type { BatchModelClient, PollOptions } from "@/src/ai/client/batch";
 import { extractJsonObject } from "@/src/ai/generation/json";
 import { caseGeneratorPromptV1 } from "@/src/ai/prompts/judges/case-generator-v1";
 import { evalCaseSchema, type EvalCase } from "@/src/schemas/eval-case";
@@ -125,6 +126,60 @@ function normaliseKey(input: string): string {
   return input.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+type Ingest = {
+  seen: Set<string>;
+  accepted: EvalCase[];
+  rejected: number;
+  duplicates: number;
+};
+
+/**
+ * Validates one batch response and folds accepted cases into the accumulator.
+ * Invalid and duplicate rows are counted and discarded, never written.
+ */
+export function ingestBatchResponse(
+  spec: BatchSpec,
+  text: string | undefined,
+  state: Ingest,
+  maxCases?: number,
+): void {
+  const payload = extractJsonObject(text ?? "") as { cases?: unknown[] } | undefined;
+  const rows = Array.isArray(payload?.cases) ? payload.cases : [];
+  if (rows.length === 0) {
+    state.rejected += spec.count;
+    return;
+  }
+
+  for (const row of rows) {
+    if (maxCases !== undefined && state.accepted.length >= maxCases) return;
+    const candidate = row as { input?: unknown };
+    if (typeof candidate.input !== "string") {
+      state.rejected += 1;
+      continue;
+    }
+    const key = normaliseKey(candidate.input);
+    if (state.seen.has(key)) {
+      state.duplicates += 1;
+      continue;
+    }
+
+    const parsed = evalCaseSchema.safeParse({
+      ...(row as object),
+      id: synthenticCaseId(candidate.input),
+      category: spec.category,
+      adversarial: spec.kind === "adversarial",
+      difficulty: spec.difficulty,
+      source: "synthetic",
+    });
+    if (!parsed.success) {
+      state.rejected += 1;
+      continue;
+    }
+    state.seen.add(key);
+    state.accepted.push(parsed.data);
+  }
+}
+
 export type GenerationReport = {
   accepted: EvalCase[];
   rejected: number;
@@ -148,14 +203,16 @@ export type GenerateOptions = {
 export async function generateSyntheticCases(
   options: GenerateOptions,
 ): Promise<GenerationReport> {
-  const seen = new Set(options.existing.map((c) => normaliseKey(c.input)));
-  const accepted: EvalCase[] = [];
-  let rejected = 0;
-  let duplicates = 0;
+  const state: Ingest = {
+    seen: new Set(options.existing.map((c) => normaliseKey(c.input))),
+    accepted: [],
+    rejected: 0,
+    duplicates: 0,
+  };
   let batches = 0;
 
   for (const spec of options.specs) {
-    if (options.maxCases !== undefined && accepted.length >= options.maxCases) break;
+    if (options.maxCases !== undefined && state.accepted.length >= options.maxCases) break;
     options.usage.assertWithinBudget();
 
     const result = await options.client.complete({
@@ -167,43 +224,83 @@ export async function generateSyntheticCases(
     options.usage.record(result.model, result.inputTokens, result.outputTokens);
     batches += 1;
 
-    const payload = extractJsonObject(result.text) as
-      | { cases?: unknown[] }
-      | undefined;
-    const rows = Array.isArray(payload?.cases) ? payload.cases : [];
-    if (rows.length === 0) rejected += spec.count;
-
-    for (const row of rows) {
-      if (options.maxCases !== undefined && accepted.length >= options.maxCases) break;
-      const candidate = row as { input?: unknown };
-      if (typeof candidate.input !== "string") {
-        rejected += 1;
-        continue;
-      }
-      const key = normaliseKey(candidate.input);
-      if (seen.has(key)) {
-        duplicates += 1;
-        continue;
-      }
-
-      const parsed = evalCaseSchema.safeParse({
-        ...(row as object),
-        id: synthenticCaseId(candidate.input),
-        category: spec.category,
-        adversarial: spec.kind === "adversarial",
-        difficulty: spec.difficulty,
-        source: "synthetic",
-      });
-      if (!parsed.success) {
-        rejected += 1;
-        continue;
-      }
-      seen.add(key);
-      accepted.push(parsed.data);
-    }
-
-    options.onProgress?.(batches, options.specs.length, accepted.length);
+    ingestBatchResponse(spec, result.text, state, options.maxCases);
+    options.onProgress?.(batches, options.specs.length, state.accepted.length);
   }
 
-  return { accepted, rejected, duplicates, batches };
+  return {
+    accepted: state.accepted,
+    rejected: state.rejected,
+    duplicates: state.duplicates,
+    batches,
+  };
+}
+
+export type GenerateBatchOptions = {
+  client: BatchModelClient;
+  specs: BatchSpec[];
+  existing: EvalCase[];
+  usage: UsageTracker;
+  maxCases?: number;
+  poll?: PollOptions;
+  onPoll?: PollOptions["onPoll"];
+};
+
+/**
+ * Submits every planned batch as a single Message Batches job. Half the cost
+ * of the sequential path, but queued rather than real-time. Validation is
+ * identical: nothing is written without passing the eval-case schema.
+ */
+export async function generateSyntheticCasesBatch(
+  options: GenerateBatchOptions,
+): Promise<GenerationReport & { batchId: string }> {
+  const state: Ingest = {
+    seen: new Set(options.existing.map((c) => normaliseKey(c.input))),
+    accepted: [],
+    rejected: 0,
+    duplicates: 0,
+  };
+
+  // custom_id must be unique within a batch, and maps back to its spec.
+  const specById = new Map<string, BatchSpec>(
+    options.specs.map((spec, index) => [`spec-${index}`, spec]),
+  );
+
+  const batchId = await options.client.submit(
+    [...specById.entries()].map(([customId, spec]) => ({
+      customId,
+      system: caseGeneratorPromptV1.systemPrompt,
+      userContent: buildBatchPrompt(spec),
+      maxOutputTokens: 2000,
+      temperature: 1,
+    })),
+  );
+
+  const results = await options.client.collect(batchId, {
+    ...options.poll,
+    onPoll: options.onPoll,
+  });
+
+  for (const result of results) {
+    options.usage.record(
+      options.client.model,
+      result.inputTokens,
+      result.outputTokens,
+    );
+    const spec = specById.get(result.customId);
+    if (!spec) continue;
+    if (result.error !== undefined) {
+      state.rejected += spec.count;
+      continue;
+    }
+    ingestBatchResponse(spec, result.text, state, options.maxCases);
+  }
+
+  return {
+    accepted: state.accepted,
+    rejected: state.rejected,
+    duplicates: state.duplicates,
+    batches: results.length,
+    batchId,
+  };
 }

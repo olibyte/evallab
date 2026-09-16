@@ -36,10 +36,29 @@ const optionalPositiveNumber = z.coerce
   .optional()
   .catch(undefined);
 
+/**
+ * Model defaults live here and nowhere else, so no model identifier is
+ * hard-coded across the codebase. Both are overridable by environment.
+ *
+ * The judge is deliberately a more capable model than the generator: a judge
+ * scoring its own family is prone to self-preference bias.
+ */
+export const DEFAULT_GENERATION_MODEL = "claude-sonnet-5";
+export const DEFAULT_JUDGE_MODEL = "claude-opus-5";
+
+const modelId = (fallback: string) =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .catch(undefined)
+    .transform((value) => value ?? fallback);
+
 const envSchema = z.object({
   ANTHROPIC_API_KEY: optionalString,
-  ANTHROPIC_MODEL: optionalString,
-  ANTHROPIC_JUDGE_MODEL: optionalString,
+  ANTHROPIC_MODEL: modelId(DEFAULT_GENERATION_MODEL),
+  ANTHROPIC_JUDGE_MODEL: modelId(DEFAULT_JUDGE_MODEL),
 
   LANGFUSE_PUBLIC_KEY: optionalString,
   LANGFUSE_SECRET_KEY: optionalString,
@@ -57,6 +76,7 @@ const envSchema = z.object({
   ALLOW_PAID_EVALS: booleanFlag,
   EVAL_MAX_CASES: z.coerce.number().int().positive().optional().catch(undefined),
   EVAL_MAX_SPEND_USD: optionalPositiveNumber,
+  EVAL_USE_BATCH_API: booleanFlag,
 
   ALLOW_DEPLOY: booleanFlag,
 });
@@ -78,9 +98,8 @@ export function resetEnvCache(): void {
 }
 
 /**
- * Live generation requires a key and an explicitly configured generation
- * model. The judge model is configured separately and may be absent, in
- * which case evaluation is reported as unavailable rather than faked.
+ * Both model roles resolve to a default, so live mode turns on the moment a
+ * key exists. The two remain independent at the configuration boundary.
  */
 export function hasLiveGenerationCredentials(env: Env = getEnv()): boolean {
   return Boolean(env.ANTHROPIC_API_KEY && env.ANTHROPIC_MODEL);

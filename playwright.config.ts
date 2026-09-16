@@ -9,5 +9,14 @@ export default defineConfig({
     url: "http://127.0.0.1:3000/api/health",
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
+    // The E2E suite covers Replay Mode, so it must not depend on whatever
+    // happens to be in a developer's .env.
+    env: {
+      ANTHROPIC_API_KEY: "",
+      LANGFUSE_PUBLIC_KEY: "",
+      LANGFUSE_SECRET_KEY: "",
+      LIVE_DEMO_ENABLED: "false",
+      ALLOW_PAID_EVALS: "false",
+    },
   },
 });

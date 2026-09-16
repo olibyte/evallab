@@ -45,6 +45,9 @@ export const experimentRunSchema = z.object({
     promptSource: z.enum(["registry", "candidate"]),
     candidateId: z.string().optional(),
     mode: z.enum(["live", "offline"]),
+    execution: z.enum(["sequential", "batch"]).default("sequential"),
+    /** Message Batches ids, when the run went through the Batch API. */
+    batchIds: z.array(z.string()).optional(),
     generationModel: z.string(),
     judgeModel: z.string().optional(),
     maxCases: z.number().optional(),

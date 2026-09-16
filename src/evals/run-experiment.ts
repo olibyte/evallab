@@ -1,4 +1,9 @@
 import { createModelClient, type ModelRole } from "@/src/ai/client/anthropic";
+import {
+  createBatchModelClient,
+  type BatchModelClient,
+  type PollOptions,
+} from "@/src/ai/client/batch";
 import { runDeterministicEvaluators } from "@/src/ai/evaluators/deterministic";
 import { calculateQualityScore } from "@/src/ai/evaluators/quality-score";
 import { judgeResponse } from "@/src/ai/evaluators/rubric-judge";
@@ -6,8 +11,14 @@ import { generateSupportResponse } from "@/src/ai/generation/generate-support-re
 import type { PromptDefinition } from "@/src/ai/prompts/types";
 import { hasLiveJudgeCredentials } from "@/src/config/env";
 import type { EvalCase } from "@/src/schemas/eval-case";
+import {
+  executeBatchRun,
+  type BatchGenerationOutcome,
+  type BatchProgress,
+} from "./batch-execution";
 import { generateOfflineResponse } from "./offline-generator";
 import { assertPaidEvalsAllowed, UsageTracker } from "./paid-guard";
+import { BATCH_DISCOUNT_MULTIPLIER } from "./pricing";
 import {
   buildRunId,
   type CaseResult,
@@ -15,6 +26,12 @@ import {
 } from "./results";
 
 export type RunMode = "live" | "offline";
+
+/**
+ * "batch" routes a live run through the Message Batches API: half the cost,
+ * but not real-time. Offline runs ignore it — there is nothing to batch.
+ */
+export type RunExecution = "sequential" | "batch";
 
 export type RunExperimentOptions = {
   cases: EvalCase[];
@@ -24,11 +41,15 @@ export type RunExperimentOptions = {
   promptSource?: "registry" | "candidate";
   candidateId?: string;
   mode: RunMode;
+  execution?: RunExecution;
   maxCases?: number;
   maxSpendUsd?: number;
   judge?: boolean;
   createClient?: (role: ModelRole) => ReturnType<typeof createModelClient>;
+  createBatchClient?: (role: ModelRole) => BatchModelClient;
   onProgress?: (done: number, total: number, caseId: string) => void;
+  onBatchProgress?: BatchProgress;
+  poll?: PollOptions;
   now?: () => number;
 };
 
@@ -56,14 +77,51 @@ export async function runExperiment(
       ? options.cases
       : options.cases.slice(0, options.maxCases);
 
-  const usage = new UsageTracker(options.maxSpendUsd);
+  const execution: RunExecution =
+    mode === "live" ? (options.execution ?? "sequential") : "sequential";
+
+  const usage = new UsageTracker(
+    options.maxSpendUsd,
+    execution === "batch" ? BATCH_DISCOUNT_MULTIPLIER : 1,
+  );
   const startedAt = new Date().toISOString();
 
   const judgeEnabled =
     mode === "live" && (options.judge ?? true) && hasLiveJudgeCredentials();
 
-  const generationClient = mode === "live" ? createClient("generation") : undefined;
-  const judgeClient = judgeEnabled ? createClient("judge") : undefined;
+  const live = mode === "live";
+  const useBatch = live && execution === "batch";
+  const createBatchClient = options.createBatchClient ?? createBatchModelClient;
+
+  const generationClient =
+    live && !useBatch ? createClient("generation") : undefined;
+  const judgeClient = judgeEnabled && !useBatch ? createClient("judge") : undefined;
+
+  const batchGenerationClient = useBatch ? createBatchClient("generation") : undefined;
+  const batchJudgeClient =
+    useBatch && judgeEnabled ? createBatchClient("judge") : undefined;
+
+  // The batch path resolves every case up front, then the loop below scores
+  // them exactly as the sequential path does.
+  let batchGeneration: Map<string, BatchGenerationOutcome> | undefined;
+  let batchRubric: Map<string, NonNullable<CaseResult["rubric"]>> | undefined;
+  let batchIds: string[] | undefined;
+
+  if (batchGenerationClient) {
+    const batchRun = await executeBatchRun({
+      cases: selected,
+      prompt,
+      generationClient: batchGenerationClient,
+      judgeClient: batchJudgeClient,
+      usage,
+      poll: options.poll,
+      onProgress: options.onBatchProgress,
+    });
+    batchGeneration = batchRun.generation;
+    batchRubric = batchRun.rubric;
+    batchIds = batchRun.batchIds;
+    usage.assertWithinBudget();
+  }
 
   const results: CaseResult[] = [];
 
@@ -77,7 +135,17 @@ export async function runExperiment(
     let caseOutputTokens = 0;
 
     try {
-      if (generationClient) {
+      if (batchGeneration) {
+        const outcome = batchGeneration.get(evalCase.id);
+        if (!outcome) {
+          error = "No batch result was returned for this case.";
+        } else {
+          output = outcome.output;
+          error = outcome.error;
+          caseInputTokens = outcome.inputTokens;
+          caseOutputTokens = outcome.outputTokens;
+        }
+      } else if (generationClient) {
         const generated = await generateSupportResponse({
           message: evalCase.input,
           prompt,
@@ -101,7 +169,10 @@ export async function runExperiment(
     let rubric: CaseResult["rubric"];
     let automatedQualityScore: number | undefined;
 
-    if (output && judgeClient) {
+    if (output && batchRubric) {
+      rubric = batchRubric.get(evalCase.id);
+      if (rubric) automatedQualityScore = calculateQualityScore(rubric);
+    } else if (output && judgeClient) {
       try {
         const judged = await judgeResponse({
           message: evalCase.input,
@@ -147,8 +218,13 @@ export async function runExperiment(
       promptSource: options.promptSource ?? "registry",
       candidateId: options.candidateId,
       mode,
-      generationModel: generationClient?.model ?? "offline-deterministic-stub",
-      judgeModel: judgeClient?.model,
+      execution,
+      batchIds,
+      generationModel:
+        generationClient?.model ??
+        batchGenerationClient?.model ??
+        "offline-deterministic-stub",
+      judgeModel: judgeClient?.model ?? batchJudgeClient?.model,
       maxCases: options.maxCases,
     },
     usage: {

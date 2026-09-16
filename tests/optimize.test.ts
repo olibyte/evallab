@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { generateSyntheticCases, planBatches } from "../src/evals/generate-cases";
+import {
+  generateSyntheticCases,
+  generateSyntheticCasesBatch,
+  planBatches,
+} from "../src/evals/generate-cases";
+import { fakeBatchClient } from "./helpers/fake-batch-client";
 import { UsageTracker } from "../src/evals/paid-guard";
 import { buildRecommendation } from "../src/evals/optimize";
 import type { RunMetrics } from "../src/evals/metrics";
@@ -68,6 +73,63 @@ describe("generateSyntheticCases", () => {
       maxCases: 1,
     });
     expect(report.accepted).toHaveLength(1);
+  });
+});
+
+describe("generateSyntheticCasesBatch", () => {
+  const specs = planBatches({ ordinary: 6, edge: 0, adversarial: 0 }, 2);
+
+  it("submits every spec in one batch and validates the results", async () => {
+    let n = 0;
+    const report = await generateSyntheticCasesBatch({
+      client: fakeBatchClient("generation", () => {
+        n += 1;
+        return { text: batchResponse([`Message ${n}a`, `Message ${n}b`]) };
+      }),
+      specs,
+      existing: [],
+      usage: new UsageTracker(),
+    });
+
+    expect(specs).toHaveLength(3);
+    expect(report.batchId).toBe("batch_generation_1");
+    expect(report.accepted).toHaveLength(6);
+    expect(new Set(report.accepted.map((c) => c.id)).size).toBe(6);
+  });
+
+  it("counts a failed batch request as rejected rather than losing it", async () => {
+    const report = await generateSyntheticCasesBatch({
+      client: fakeBatchClient("generation", (request) =>
+        request.customId === "spec-1"
+          ? { error: "Batch request errored." }
+          : {
+              text: batchResponse([
+                `${request.customId} first`,
+                `${request.customId} second`,
+              ]),
+            },
+      ),
+      specs,
+      existing: [],
+      usage: new UsageTracker(),
+    });
+
+    expect(report.accepted).toHaveLength(4);
+    expect(report.rejected).toBe(2);
+  });
+
+  it("applies the same validation as the sequential path", async () => {
+    const report = await generateSyntheticCasesBatch({
+      client: fakeBatchClient("generation", () => ({
+        text: JSON.stringify({ cases: [{ input: "missing expected block" }] }),
+      })),
+      specs,
+      existing: [],
+      usage: new UsageTracker(),
+    });
+
+    expect(report.accepted).toHaveLength(0);
+    expect(report.rejected).toBe(3);
   });
 });
 

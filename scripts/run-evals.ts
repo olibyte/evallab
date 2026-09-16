@@ -21,11 +21,15 @@ Usage: pnpm eval:run [options]
   --prompt <id>        support prompt id from the registry (default: active prompt)
   --candidate <id>     evaluate a stored candidate prompt instead
   --mode <mode>        offline | live                                (default: offline)
+  --execution <how>    sequential | batch                            (default: sequential)
   --max-cases <n>      cap the number of cases
   --no-judge           skip rubric evaluation in live mode
   --help
 
 Live mode makes paid Anthropic calls and requires ALLOW_PAID_EVALS=true.
+Batch execution routes the run through the Message Batches API: half the
+cost, but it is queued rather than real-time. EVAL_USE_BATCH_API=true makes
+it the default for live runs.
 `.trim();
 
 async function main() {
@@ -66,8 +70,15 @@ async function main() {
   const mode = args.values.get("mode") === "live" ? "live" : "offline";
   const maxCases = resolveCaseLimit(numberArg(args, "max-cases"));
 
+  const requestedExecution = args.values.get("execution");
+  const execution: "sequential" | "batch" =
+    requestedExecution === "batch" ||
+    (requestedExecution === undefined && getEnv().EVAL_USE_BATCH_API)
+      ? "batch"
+      : "sequential";
+
   console.log(
-    `Running ${maxCases ?? cases.length} case(s) from "${datasetId}" against ${candidateId ?? prompt.id} in ${mode} mode.`,
+    `Running ${maxCases ?? cases.length} case(s) from "${datasetId}" against ${candidateId ?? prompt.id} in ${mode} mode (${execution}).`,
   );
 
   const run = await runExperiment({
@@ -78,6 +89,7 @@ async function main() {
     promptSource,
     candidateId,
     mode,
+    execution,
     maxCases,
     maxSpendUsd: getEnv().EVAL_MAX_SPEND_USD,
     judge: !args.flags.has("no-judge"),
@@ -86,12 +98,22 @@ async function main() {
         console.log(`  ${done}/${total} (${caseId})`);
       }
     },
+    onBatchProgress: (stage, status, counts) =>
+      console.log(
+        `  [${stage}] ${status} - ${Object.entries(counts)
+          .map(([key, value]) => `${key}=${value}`)
+          .join(" ")}`,
+      ),
   });
 
   const filePath = saveRun(run);
   const metrics = computeMetrics(run);
 
-  console.log(`\nSaved run ${run.runId}\n  ${filePath}\n`);
+  console.log(`\nSaved run ${run.runId}\n  ${filePath}`);
+  if (run.config.batchIds?.length) {
+    console.log(`  batches: ${run.config.batchIds.join(", ")}`);
+  }
+  console.log("");
   printMetrics(metrics);
   printGates(evaluateGates(metrics));
 }

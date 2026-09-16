@@ -67,6 +67,20 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Deployment documentation
 - [ ] Vercel deploy (BLOCKED: requires `ALLOW_DEPLOY=true` + credentials)
 
+## Cost and throughput
+- [x] Model defaults centralised in `src/config/env.ts` (`claude-sonnet-5`
+      generation, `claude-opus-5` judge), both environment-overridable
+- [x] `evals/pricing.json` populated with current Anthropic rates
+- [x] Batch API client (`src/ai/client/batch.ts`)
+- [x] Batch execution for `eval:run` (generation + retry + judge batches)
+- [x] Batch execution for `eval:generate`
+- [x] Batch execution for `prompt:optimize`
+- [x] Batch runs costed at the 50% Batch API rate
+- [ ] Chunk batches above the 100,000-request limit (currently refuses with a
+      clear error; the corpus is far below the limit)
+- [ ] `--batch-id` resume flag to collect a batch that outlived its poll
+      timeout (the timeout error already prints the id)
+
 ## Outstanding follow-ups
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling
       public live inference on multi-instance hosting; in-memory store cannot

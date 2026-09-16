@@ -1,0 +1,14 @@
+{
+  "claude-sonnet-5": {
+    "inputUsdPerMillionTokens": 2,
+    "outputUsdPerMillionTokens": 10
+  },
+  "claude-opus-5": {
+    "inputUsdPerMillionTokens": 5,
+    "outputUsdPerMillionTokens": 25
+  },
+  "claude-haiku-4-5-20251001": {
+    "inputUsdPerMillionTokens": 1,
+    "outputUsdPerMillionTokens": 5
+  }
+}

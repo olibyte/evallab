@@ -162,19 +162,42 @@ written to `evals/benchmarks/latest.json`.
 To produce a real benchmark once credentials exist:
 
 ```bash
-export ANTHROPIC_API_KEY=...
-export ANTHROPIC_MODEL=...
-export ANTHROPIC_JUDGE_MODEL=...
+export ANTHROPIC_API_KEY=...          # console.anthropic.com, not claude.ai
 export ALLOW_PAID_EVALS=true
 export EVAL_MAX_CASES=60
 
-pnpm eval:run --dataset human --mode live
+pnpm eval:run --dataset human --mode live --execution batch
 pnpm eval:compare --list
 pnpm eval:compare <baseline-run-id> <candidate-run-id> --write-benchmark
 ```
 
+`ANTHROPIC_MODEL` and `ANTHROPIC_JUDGE_MODEL` default to `claude-sonnet-5` and
+`claude-opus-5`; set them only to override.
+
+Note that API credit is billed separately from a claude.ai subscription. A
+Claude Pro balance does not fund Messages API calls, and the API returns a
+`400 invalid_request_error` about credit balance when the console balance is
+empty.
+
 The engineering view renders `latest.json` when it exists and says plainly
 that no benchmark exists when it does not.
+
+## Models
+
+| Role | Environment variable | Default |
+| --- | --- | --- |
+| Generation | `ANTHROPIC_MODEL` | `claude-sonnet-5` |
+| Judge | `ANTHROPIC_JUDGE_MODEL` | `claude-opus-5` |
+
+Defaults live in `src/config/env.ts` and nowhere else; no model identifier is
+hard-coded anywhere in the application or the scripts. The two roles are
+independent at the configuration boundary even when they point at the same
+model.
+
+The judge defaults to a more capable model than the generator on purpose. A
+judge from the same family as the generator is prone to self-preference bias,
+which would quietly inflate every score the project reports. If cost forces a
+weaker judge, say so alongside the numbers.
 
 ## Observability
 
@@ -216,6 +239,7 @@ All commands:
 | `pnpm eval:smoke` | 24 representative cases, offline by default |
 | `pnpm eval:generate` | Synthetic eval generation (**paid**) |
 | `pnpm eval:run` | Experiment runner (offline by default, `--mode live` is **paid**) |
+| `pnpm eval:run --execution batch` | Same, through the Batch API at half cost |
 | `pnpm eval:compare` | Compare existing runs (never calls a model) |
 | `pnpm prompt:optimize` | Candidate search and recommendation (**paid**) |
 
@@ -244,22 +268,45 @@ pnpm eval:run --mode live          # paid
 pnpm prompt:optimize               # paid
 ```
 
-`EVAL_MAX_CASES` caps the number of cases in any run and is combined with any
-`--max-cases` flag, taking whichever is tighter. `EVAL_MAX_SPEND_USD` is
-enforced against *tracked actual* spend, which requires an operator-supplied
-`evals/pricing.json`:
+### Batch API
 
-```json
-{
-  "your-model-id": {
-    "inputUsdPerMillionTokens": 0,
-    "outputUsdPerMillionTokens": 0
-  }
-}
+Large offline runs can go through the Message Batches API, which bills at half
+the standard rate in exchange for being queued rather than real-time:
+
+```bash
+pnpm eval:run --mode live --execution batch
+pnpm eval:generate --execution batch
+pnpm prompt:optimize --execution batch
 ```
 
-Without that file, cost is reported as unavailable rather than estimated from
-invented prices, and runs are bounded by case and token limits instead.
+`EVAL_USE_BATCH_API=true` makes batch the default for every live run. Batching
+is never used on the `/api/respond` request path — a public demo needs a
+response now, not in an hour.
+
+`eval:run` submits one generation batch, a retry batch for anything that came
+back malformed (mirroring the sequential path's single retry), then one judge
+batch. A per-request failure inside a batch is recorded against that case, not
+thrown; the rest of the batch still counts. Batch ids are stored on the run
+record so a long job can be traced in the console.
+
+`prompt:optimize` benefits most: it evaluates the baseline plus every candidate
+over the whole dataset.
+
+### Cost controls
+
+`EVAL_MAX_CASES` caps the number of cases in any run and is combined with any
+`--max-cases` flag, taking whichever is tighter. `EVAL_MAX_SPEND_USD` is
+enforced against *tracked actual* spend, using `evals/pricing.json`:
+
+| Model | Input $/M | Output $/M |
+| --- | --- | --- |
+| `claude-sonnet-5` | 2 | 10 |
+| `claude-opus-5` | 5 | 25 |
+| `claude-haiku-4-5-20251001` | 1 | 5 |
+
+Batch runs are costed at half these rates. A model with no entry is reported as
+unpriced rather than free, so cost is never estimated from invented prices.
+Update the file when Anthropic pricing changes — nothing else reads rates.
 
 ## Adding an eval case
 
