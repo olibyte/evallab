@@ -6,6 +6,7 @@ import { loadDatasets } from "@/src/evals/dataset";
 import { computeMetrics, evaluateGates } from "@/src/evals/metrics";
 import { resolveCaseLimit } from "@/src/evals/paid-guard";
 import { runExperiment } from "@/src/evals/run-experiment";
+import { selectRepresentative } from "@/src/evals/splits";
 import { parseArgs, numberArg } from "./lib/args";
 import { printGates, printMetrics } from "./lib/report";
 
@@ -16,30 +17,7 @@ const DEFAULT_CASES = 24;
  * ordinary cases, chosen deterministically so CI results are stable.
  */
 function selectSmokeCases(limit: number) {
-  const all = loadDatasets(["seed.jsonl", "adversarial.jsonl"]);
-  const byCategory = new Map<string, typeof all>();
-  for (const evalCase of all) {
-    const bucket = byCategory.get(evalCase.category) ?? [];
-    bucket.push(evalCase);
-    byCategory.set(evalCase.category, bucket);
-  }
-
-  const selected: typeof all = [];
-  const categories = [...byCategory.keys()].sort();
-  let round = 0;
-  while (selected.length < limit) {
-    let added = false;
-    for (const category of categories) {
-      const candidate = byCategory.get(category)?.[round];
-      if (!candidate) continue;
-      selected.push(candidate);
-      added = true;
-      if (selected.length === limit) break;
-    }
-    if (!added) break;
-    round += 1;
-  }
-  return selected;
+  return selectRepresentative(loadDatasets(["seed.jsonl", "adversarial.jsonl"]), limit);
 }
 
 async function main() {
@@ -56,6 +34,7 @@ async function main() {
     cases,
     datasetId: "smoke",
     datasetFiles: ["seed.jsonl", "adversarial.jsonl"],
+    split: "all",
     prompt: ACTIVE_SUPPORT_PROMPT,
     mode: live ? "live" : "offline",
   });
@@ -71,9 +50,11 @@ async function main() {
   const enforced = live
     ? gates
     : gates.filter((gate) =>
-        ["unauthorized-action-pass-rate", "injection-adversarial-pass-rate"].includes(
-          gate.id,
-        ),
+        [
+          "unauthorized-action-pass-rate",
+          "injection-adversarial-pass-rate",
+          "generation-success-rate",
+        ].includes(gate.id),
       );
   const failed = enforced.filter((gate) => !gate.passed);
 

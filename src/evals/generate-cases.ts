@@ -5,6 +5,7 @@ import { extractJsonObject } from "@/src/ai/generation/json";
 import { caseGeneratorPromptV1 } from "@/src/ai/prompts/judges/case-generator-v1";
 import { evalCaseSchema, type EvalCase } from "@/src/schemas/eval-case";
 import { UsageTracker } from "./paid-guard";
+import { BATCH_DISCOUNT_MULTIPLIER } from "./pricing";
 
 export type BatchKind = "ordinary" | "edge" | "adversarial";
 
@@ -244,6 +245,10 @@ export type GenerateBatchOptions = {
   maxCases?: number;
   poll?: PollOptions;
   onPoll?: PollOptions["onPoll"];
+  /** A batch already submitted for exactly these specs; collected, not resubmitted. */
+  resumeBatchId?: string;
+  /** Called with the batch id as soon as it is submitted. */
+  onSubmitted?: (batchId: string) => void;
 };
 
 /**
@@ -266,15 +271,19 @@ export async function generateSyntheticCasesBatch(
     options.specs.map((spec, index) => [`spec-${index}`, spec]),
   );
 
-  const batchId = await options.client.submit(
-    [...specById.entries()].map(([customId, spec]) => ({
-      customId,
-      system: caseGeneratorPromptV1.systemPrompt,
-      userContent: buildBatchPrompt(spec),
-      maxOutputTokens: 2000,
-      temperature: 1,
-    })),
-  );
+  let batchId = options.resumeBatchId;
+  if (batchId === undefined) {
+    batchId = await options.client.submit(
+      [...specById.entries()].map(([customId, spec]) => ({
+        customId,
+        system: caseGeneratorPromptV1.systemPrompt,
+        userContent: buildBatchPrompt(spec),
+        maxOutputTokens: 2000,
+        temperature: 1,
+      })),
+    );
+    options.onSubmitted?.(batchId);
+  }
 
   const results = await options.client.collect(batchId, {
     ...options.poll,
@@ -286,6 +295,7 @@ export async function generateSyntheticCasesBatch(
       options.client.model,
       result.inputTokens,
       result.outputTokens,
+      BATCH_DISCOUNT_MULTIPLIER,
     );
     const spec = specById.get(result.customId);
     if (!spec) continue;

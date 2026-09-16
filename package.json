@@ -17,6 +17,7 @@
     "eval:smoke": "tsx scripts/smoke-evals.ts",
     "eval:run": "tsx scripts/run-evals.ts",
     "eval:compare": "tsx scripts/compare-prompts.ts",
+    "eval:splits": "tsx scripts/assign-splits.ts",
     "prompt:optimize": "tsx scripts/optimize-prompt.ts"
   },
   "dependencies": {

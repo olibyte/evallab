@@ -17,12 +17,12 @@ export function printMetrics(metrics: RunMetrics, indent = ""): void {
     `Helpfulness mean            ${fmt(metrics.rubric.helpfulness)}`,
     `Tone mean                   ${fmt(metrics.rubric.tone)}`,
     `Automated quality score     ${fmt(metrics.rubric.automatedQualityScore, 1)}`,
-    `Judged cases                ${metrics.rubric.judgedCases}`,
-    `Deterministic pass rate     ${pct(metrics.deterministicPassRate)}`,
-    `Injection (adversarial)     ${pct(metrics.injectionPassRate)}`,
+    `Judged cases                ${metrics.rubric.judgedCases} of ${metrics.cases} (${metrics.rubric.unjudgedCases} unjudged with output)`,
+    `Deterministic pass (case)   ${pct(metrics.deterministicPassRate)}`,
+    `Adversarial pass (case)     ${pct(metrics.adversarialPassRate)} over ${metrics.adversarialCases} case(s)`,
     `Latency mean / median       ${fmt(metrics.latencyMeanMs, 0)}ms / ${fmt(metrics.latencyMedianMs, 0)}ms`,
     `Tokens in / out             ${metrics.inputTokens} / ${metrics.outputTokens}`,
-    `Estimated cost              ${metrics.estimatedCostUsd === undefined ? "unavailable (no pricing configured)" : `$${metrics.estimatedCostUsd.toFixed(4)}`}`,
+    `Estimated cost              ${metrics.estimatedCostUsd === undefined ? "unavailable (no pricing, or an unpriced model was used)" : `$${metrics.estimatedCostUsd.toFixed(4)}`}`,
   ];
   for (const line of lines) console.log(indent + line);
 
@@ -49,22 +49,30 @@ export function printComparison(comparison: Comparison): void {
   }
   if (comparison.warnings.length > 0) console.log("");
 
+  if (!comparison.comparable) {
+    console.warn("NOT COMPARABLE: the runs differ in what was tested or how. This must not become a benchmark.\n");
+  }
+
   const entries = [comparison.baseline, ...comparison.candidates];
   for (const [index, entry] of entries.entries()) {
     const role = index === 0 ? "BASELINE" : `CANDIDATE ${index}`;
     console.log(
-      `${role}: ${entry.candidateId ?? entry.promptId}  run=${entry.runId}  dataset=${entry.datasetId} (${entry.datasetSize} cases, ${entry.mode})`,
+      `${role}: ${entry.candidateId ?? entry.promptId}  run=${entry.runId}  dataset=${entry.datasetId}/${entry.split} (${entry.datasetSize} cases, ${entry.mode}, ${entry.execution})`,
+    );
+    console.log(
+      `  generation=${entry.generationModel}  judge=${entry.judgeModel ?? "none"} (${entry.judgePromptId ?? "no judge prompt"})  prompt-hash=${entry.promptHash?.slice(0, 12) ?? "n/a"}`,
     );
     printMetrics(entry.metrics, "  ");
     console.log("");
   }
 
+  const describe = (change: Comparison["improvements"][number]) =>
+    change.reason === "rubric"
+      ? `${change.caseId} (${change.category}) quality ${change.baselineQualityScore} -> ${change.candidateQualityScore}`
+      : `${change.caseId} (${change.category}) ${change.baseline} -> ${change.candidate}`;
+
   console.log(`Improved cases: ${comparison.improvements.length}`);
-  for (const change of comparison.improvements) {
-    console.log(`  + ${change.caseId} (${change.category}) ${change.baseline} -> ${change.candidate}`);
-  }
+  for (const change of comparison.improvements) console.log(`  + ${describe(change)}`);
   console.log(`Regressed cases: ${comparison.regressions.length}`);
-  for (const change of comparison.regressions) {
-    console.log(`  - ${change.caseId} (${change.category}) ${change.baseline} -> ${change.candidate}`);
-  }
+  for (const change of comparison.regressions) console.log(`  - ${describe(change)}`);
 }

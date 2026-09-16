@@ -12,9 +12,13 @@ Usage: pnpm eval:compare <baseline-run-id> <candidate-run-id> [more-run-ids...]
 
   --list               show available run ids
   --write-benchmark    persist the comparison to evals/benchmarks/
+  --allow-mismatch     write the benchmark even when the runs are not
+                       like-for-like (different cases, models or judge)
   --help
 
 Compares existing experiment results only. No model is ever called.
+A benchmark is refused unless every run covered the same cases with the same
+generation model, judge model and judge prompt as the baseline.
 `.trim();
 
 async function main() {
@@ -39,7 +43,10 @@ async function main() {
   printComparison(comparison);
 
   if (args.flags.has("write-benchmark")) {
-    const { snapshotPath, latestPath } = saveBenchmark(buildBenchmark(comparison));
+    const benchmark = buildBenchmark(comparison, {
+      allowMismatch: args.flags.has("allow-mismatch"),
+    });
+    const { snapshotPath, latestPath } = saveBenchmark(benchmark);
     console.log(`\nBenchmark written:\n  ${snapshotPath}\n  ${latestPath}`);
   }
 }

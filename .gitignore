@@ -1,16 +1,36 @@
+# Dependencies
 node_modules/
+
+# Next.js
 .next/
 out/
 build/
-.env
-.env.local
-.env.*.local
+
+# Environment / secrets
+.env*
+!.env.example
+
+# Logs
 *.log
-.DS_Store
+
+# Test / coverage output
 coverage/
 test-results/
 playwright-report/
-.vercel
-next-env.d.ts
+
+# TypeScript
 *.tsbuildinfo
-evals/results/*.json
+
+# Deployment
+.vercel/
+
+# macOS
+.DS_Store
+
+# Eval run working data
+evals/results/
+
+# Local agent tooling
+.agents/
+.claude/
+skills-lock.json

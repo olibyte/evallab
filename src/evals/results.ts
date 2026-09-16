@@ -25,6 +25,8 @@ export const caseResultSchema = z.object({
   error: z.string().optional(),
   deterministic: z.array(evaluationResultSchema),
   rubric: rubricEvaluationSchema.optional(),
+  /** Why the judge produced no rubric for a case that had valid output. */
+  judgeError: z.string().optional(),
   automatedQualityScore: z.number().optional(),
   latencyMs: z.number(),
   inputTokens: z.number(),
@@ -39,11 +41,25 @@ export const experimentRunSchema = z.object({
     datasetId: z.string(),
     datasetFiles: z.array(z.string()),
     datasetSize: z.number(),
+    /** dev | heldout | adversarial-holdout | holdout | all (see splits.ts). */
+    split: z.string().default("all"),
+    /** sha256 over the exact cases run; equal hashes mean an identical test. */
+    datasetHash: z.string().optional(),
     promptId: z.string(),
     promptVersion: z.number(),
-    /** Candidate runs carry the prompt text so the run stays reproducible. */
+    /** sha256 of the system prompt text actually sent. */
+    promptHash: z.string().optional(),
     promptSource: z.enum(["registry", "candidate"]),
     candidateId: z.string().optional(),
+    judgePromptId: z.string().optional(),
+    judgePromptHash: z.string().optional(),
+    generationParams: z
+      .object({ temperature: z.number(), maxOutputTokens: z.number() })
+      .optional(),
+    judgeParams: z
+      .object({ temperature: z.number(), maxOutputTokens: z.number() })
+      .optional(),
+    gitCommit: z.string().optional(),
     mode: z.enum(["live", "offline"]),
     execution: z.enum(["sequential", "batch"]).default("sequential"),
     /** Message Batches ids, when the run went through the Batch API. */
@@ -55,7 +71,20 @@ export const experimentRunSchema = z.object({
   usage: z.object({
     inputTokens: z.number(),
     outputTokens: z.number(),
+    /** Absent when any model used in the run had no configured price. */
     estimatedCostUsd: z.number().optional(),
+    unpricedModels: z.array(z.string()).default([]),
+    /** The per-million-token rates the estimate was computed from. */
+    pricing: z
+      .record(
+        z.string(),
+        z.object({
+          inputUsdPerMillionTokens: z.number(),
+          outputUsdPerMillionTokens: z.number(),
+          discountMultiplier: z.number(),
+        }),
+      )
+      .optional(),
   }),
   cases: z.array(caseResultSchema),
 });
@@ -64,10 +93,15 @@ export type CaseResult = z.infer<typeof caseResultSchema>;
 export type ExperimentRun = z.infer<typeof experimentRunSchema>;
 
 /** Deterministic enough to identify the run, unique across executions. */
-export function buildRunId(promptId: string, datasetId: string, at = new Date()): string {
+export function buildRunId(
+  promptId: string,
+  datasetId: string,
+  split = "all",
+  at = new Date(),
+): string {
   const stamp = at.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   const suffix = Math.random().toString(36).slice(2, 7);
-  return `${stamp}-${datasetId}-${promptId}-${suffix}`;
+  return `${stamp}-${datasetId}-${split}-${promptId}-${suffix}`;
 }
 
 export function saveRun(run: ExperimentRun): string {

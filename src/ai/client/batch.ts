@@ -146,7 +146,7 @@ export function createBatchModelClient(role: ModelRole): BatchModelClient {
         if (now() >= deadline) {
           throw new ModelError(
             "timeout",
-            `Batch ${batchId} did not finish within the timeout. It is still running; rerun with --batch-id ${batchId} to collect it later.`,
+            `Batch ${batchId} did not finish within the timeout. It is still running on the Anthropic side; collect it later with the --resume flag of the command that submitted it.`,
           );
         }
         await sleep(interval);

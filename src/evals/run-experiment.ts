@@ -1,24 +1,46 @@
-import { createModelClient, type ModelRole } from "@/src/ai/client/anthropic";
+import {
+  createModelClient,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  type ModelRole,
+} from "@/src/ai/client/anthropic";
 import {
   createBatchModelClient,
   type BatchModelClient,
   type PollOptions,
 } from "@/src/ai/client/batch";
-import { runDeterministicEvaluators } from "@/src/ai/evaluators/deterministic";
+import {
+  runDeterministicEvaluators,
+  structuredOutputFailure,
+} from "@/src/ai/evaluators/deterministic";
 import { calculateQualityScore } from "@/src/ai/evaluators/quality-score";
-import { judgeResponse } from "@/src/ai/evaluators/rubric-judge";
-import { generateSupportResponse } from "@/src/ai/generation/generate-support-response";
+import {
+  JUDGE_MAX_OUTPUT_TOKENS,
+  JudgeOutputError,
+  judgeResponse,
+} from "@/src/ai/evaluators/rubric-judge";
+import {
+  GenerationOutputError,
+  generateSupportResponse,
+} from "@/src/ai/generation/generate-support-response";
+import { ACTIVE_JUDGE_PROMPT } from "@/src/ai/prompts/judges";
 import type { PromptDefinition } from "@/src/ai/prompts/types";
 import { hasLiveJudgeCredentials } from "@/src/config/env";
 import type { EvalCase } from "@/src/schemas/eval-case";
 import {
   executeBatchRun,
   type BatchGenerationOutcome,
+  type BatchJudgeOutcome,
   type BatchProgress,
 } from "./batch-execution";
 import { generateOfflineResponse } from "./offline-generator";
 import { assertPaidEvalsAllowed, UsageTracker } from "./paid-guard";
-import { BATCH_DISCOUNT_MULTIPLIER } from "./pricing";
+import {
+  FilePendingRunStore,
+  type BatchStages,
+  type PendingRun,
+  type PendingRunStore,
+} from "./pending";
+import { currentGitCommit, datasetFingerprint, hashText } from "./provenance";
 import {
   buildRunId,
   type CaseResult,
@@ -37,6 +59,8 @@ export type RunExperimentOptions = {
   cases: EvalCase[];
   datasetId: string;
   datasetFiles: string[];
+  /** Which split the cases came from; recorded, and checked by comparisons. */
+  split?: string;
   prompt: PromptDefinition;
   promptSource?: "registry" | "candidate";
   candidateId?: string;
@@ -44,13 +68,22 @@ export type RunExperimentOptions = {
   execution?: RunExecution;
   maxCases?: number;
   maxSpendUsd?: number;
+  /** A shared budget, so a multi-run workflow cannot spend the cap per run. */
+  budget?: UsageTracker;
   judge?: boolean;
+  judgePrompt?: PromptDefinition;
   createClient?: (role: ModelRole) => ReturnType<typeof createModelClient>;
   createBatchClient?: (role: ModelRole) => BatchModelClient;
   onProgress?: (done: number, total: number, caseId: string) => void;
   onBatchProgress?: BatchProgress;
   poll?: PollOptions;
   now?: () => number;
+  /**
+   * Batch runs record their submitted batch ids here so a later process can
+   * finish them. `resume` supplies a previously recorded run to continue.
+   */
+  pendingStore?: PendingRunStore;
+  resume?: PendingRun;
 };
 
 /**
@@ -69,6 +102,8 @@ export async function runExperiment(
     createClient = createModelClient,
     now = () => Date.now(),
   } = options;
+  const split = options.split ?? "all";
+  const judgePrompt = options.judgePrompt ?? ACTIVE_JUDGE_PROMPT;
 
   if (mode === "live") assertPaidEvalsAllowed("eval:run --mode live");
 
@@ -80,11 +115,9 @@ export async function runExperiment(
   const execution: RunExecution =
     mode === "live" ? (options.execution ?? "sequential") : "sequential";
 
-  const usage = new UsageTracker(
-    options.maxSpendUsd,
-    execution === "batch" ? BATCH_DISCOUNT_MULTIPLIER : 1,
-  );
-  const startedAt = new Date().toISOString();
+  const usage = new UsageTracker(options.maxSpendUsd, options.budget);
+  const runId = options.resume?.runId ?? buildRunId(options.candidateId ?? prompt.id, datasetId, split);
+  const startedAt = options.resume?.startedAt ?? new Date().toISOString();
 
   const judgeEnabled =
     mode === "live" && (options.judge ?? true) && hasLiveJudgeCredentials();
@@ -104,23 +137,53 @@ export async function runExperiment(
   // The batch path resolves every case up front, then the loop below scores
   // them exactly as the sequential path does.
   let batchGeneration: Map<string, BatchGenerationOutcome> | undefined;
-  let batchRubric: Map<string, NonNullable<CaseResult["rubric"]>> | undefined;
+  let batchJudge: Map<string, BatchJudgeOutcome> | undefined;
   let batchIds: string[] | undefined;
 
   if (batchGenerationClient) {
+    const pendingStore = options.pendingStore ?? new FilePendingRunStore();
+    const pending: PendingRun = options.resume ?? {
+      runId,
+      startedAt,
+      datasetId,
+      datasetFiles,
+      split,
+      maxCases: options.maxCases,
+      maxSpendUsd: options.maxSpendUsd,
+      judge: judgeEnabled,
+      promptSource: options.promptSource ?? "registry",
+      candidateId: options.candidateId,
+      prompt: {
+        id: prompt.id,
+        version: prompt.version,
+        description: prompt.description,
+        createdAt: prompt.createdAt,
+        systemPrompt: prompt.systemPrompt,
+      },
+      judgePromptId: judgePrompt.id,
+      cases: selected,
+      stages: {},
+    };
+    pendingStore.save(pending);
+
     const batchRun = await executeBatchRun({
       cases: selected,
       prompt,
+      judgePrompt,
       generationClient: batchGenerationClient,
       judgeClient: batchJudgeClient,
       usage,
       poll: options.poll,
       onProgress: options.onBatchProgress,
+      resume: pending.stages,
+      onStageSubmitted: (stages: BatchStages) =>
+        pendingStore.save({ ...pending, stages }),
     });
     batchGeneration = batchRun.generation;
-    batchRubric = batchRun.rubric;
+    batchJudge = batchRun.judge;
     batchIds = batchRun.batchIds;
     usage.assertWithinBudget();
+    pendingStore.remove(runId);
   }
 
   const results: CaseResult[] = [];
@@ -160,29 +223,52 @@ export async function runExperiment(
       }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : "Generation failed.";
+      if (caught instanceof GenerationOutputError) {
+        caseInputTokens = caught.inputTokens;
+        caseOutputTokens = caught.outputTokens;
+        usage.record(caught.generationModel, caught.inputTokens, caught.outputTokens);
+      }
     }
 
+    // A case with no valid output still gets a verdict, and a failing one:
+    // it must stay in every denominator rather than vanish from the run.
     const deterministic = output
       ? await runDeterministicEvaluators(evalCase, output)
-      : [];
+      : [structuredOutputFailure(error ?? "generation produced no output")];
 
     let rubric: CaseResult["rubric"];
+    let judgeError: string | undefined;
     let automatedQualityScore: number | undefined;
 
-    if (output && batchRubric) {
-      rubric = batchRubric.get(evalCase.id);
+    if (output && batchJudge) {
+      const outcome = batchJudge.get(evalCase.id);
+      rubric = outcome?.rubric;
+      judgeError = outcome?.error;
       if (rubric) automatedQualityScore = calculateQualityScore(rubric);
+      caseInputTokens += outcome?.inputTokens ?? 0;
+      caseOutputTokens += outcome?.outputTokens ?? 0;
     } else if (output && judgeClient) {
       try {
         const judged = await judgeResponse({
           message: evalCase.input,
           output,
           client: judgeClient,
+          judgePrompt,
         });
         rubric = judged.rubric;
         automatedQualityScore = calculateQualityScore(judged.rubric);
-      } catch {
-        // Judge failure leaves the case unjudged rather than fabricating scores.
+        caseInputTokens += judged.inputTokens;
+        caseOutputTokens += judged.outputTokens;
+        usage.record(judged.judgeModel, judged.inputTokens, judged.outputTokens);
+      } catch (caught) {
+        // Judge failure leaves the case unjudged, and says why, rather than
+        // fabricating scores. A malformed reply still cost tokens.
+        judgeError = caught instanceof Error ? caught.message : "Judge failed.";
+        if (caught instanceof JudgeOutputError) {
+          caseInputTokens += caught.inputTokens;
+          caseOutputTokens += caught.outputTokens;
+          usage.record(caught.judgeModel, caught.inputTokens, caught.outputTokens);
+        }
       }
     }
 
@@ -196,6 +282,7 @@ export async function runExperiment(
       error,
       deterministic,
       rubric,
+      judgeError,
       automatedQualityScore,
       latencyMs: now() - startedMs,
       inputTokens: caseInputTokens,
@@ -205,18 +292,32 @@ export async function runExperiment(
     options.onProgress?.(index + 1, selected.length, evalCase.id);
   }
 
+  const judgeModel = judgeClient?.model ?? batchJudgeClient?.model;
+
   return {
-    runId: buildRunId(options.candidateId ?? prompt.id, datasetId),
+    runId,
     startedAt,
     finishedAt: new Date().toISOString(),
     config: {
       datasetId,
       datasetFiles,
       datasetSize: selected.length,
+      split,
+      datasetHash: datasetFingerprint(selected),
       promptId: prompt.id,
       promptVersion: prompt.version,
+      promptHash: hashText(prompt.systemPrompt),
       promptSource: options.promptSource ?? "registry",
       candidateId: options.candidateId,
+      judgePromptId: judgeModel ? judgePrompt.id : undefined,
+      judgePromptHash: judgeModel ? hashText(judgePrompt.systemPrompt) : undefined,
+      generationParams: live
+        ? { temperature: 0, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS }
+        : undefined,
+      judgeParams: judgeModel
+        ? { temperature: 0, maxOutputTokens: JUDGE_MAX_OUTPUT_TOKENS }
+        : undefined,
+      gitCommit: currentGitCommit(),
       mode,
       execution,
       batchIds,
@@ -224,13 +325,15 @@ export async function runExperiment(
         generationClient?.model ??
         batchGenerationClient?.model ??
         "offline-deterministic-stub",
-      judgeModel: judgeClient?.model ?? batchJudgeClient?.model,
+      judgeModel,
       maxCases: options.maxCases,
     },
     usage: {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       estimatedCostUsd: usage.estimatedCostUsd,
+      unpricedModels: usage.unpricedModels,
+      pricing: usage.pricingSnapshot,
     },
     cases: results,
   };

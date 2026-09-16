@@ -5,7 +5,7 @@ import {
   SUPPORT_PROMPTS,
   getSupportPromptById,
 } from "../src/ai/prompts/support";
-import { rubricJudgePromptV1 } from "../src/ai/prompts/judges/rubric-v1";
+import { ACTIVE_JUDGE_PROMPT } from "../src/ai/prompts/judges";
 import { getSupportPolicy } from "../src/domain/support-policy";
 import { supportResponseSchema } from "../src/schemas/support";
 
@@ -56,9 +56,9 @@ describe("prompt registry", () => {
 
   it("keeps the judge prompt separate from the support prompt", () => {
     expect(SUPPORT_PROMPTS.map((p) => p.id)).not.toContain(
-      rubricJudgePromptV1.id,
+      ACTIVE_JUDGE_PROMPT.id,
     );
-    expect(rubricJudgePromptV1.systemPrompt).toContain("evaluation judge");
+    expect(ACTIVE_JUDGE_PROMPT.systemPrompt).toContain("evaluation judge");
   });
 });
 

@@ -147,6 +147,139 @@ path unchanged and lets both be tested against fakes; tests assert the two
 paths produce identical case results.
 
 **Known gaps.** Batches above the 100,000-request limit are refused with a
-clear error rather than chunked, and a batch that outlives its poll timeout
-must currently be collected by hand (the error prints the batch id). Both are
-recorded in `docs/TASKS.md`.
+clear error rather than chunked (recorded in `docs/TASKS.md`). Resume after a
+poll timeout was added later; see the pending-manifest decision below.
+
+## 2026-09-16 - Frozen dataset splits: dev, heldout, adversarial-holdout
+
+**Decision.** Every eval case carries a split in `evals/datasets/splits.json`,
+assigned once by `pnpm eval:splits` and never moved. Assignment is stratified
+within (category, adversarial) groups in `sha256(id)` order: 60% of ordinary
+cases and 50% of adversarial cases go to `dev`; the rest go to `heldout` or
+`adversarial-holdout`. `eval:run` defaults to `--split holdout`.
+`prompt:optimize` is pinned to `dev` and rejects `--split`. A case with no
+assignment fails any run that loads it. `eval:generate` assigns splits to new
+synthetic cases as it writes them.
+
+**Why.** Before this, the optimizer proposed candidates from failures on the
+same cases it was then scored on, and the proposer saw the case inputs
+verbatim. A benchmark produced that way measures memorisation. A manifest, not
+a hash rule alone, so that assignments are auditable in a diff and stay fixed
+when cases are added. A new command rather than a flag because assigning
+splits is a distinct, unpaid operation and the spec's rule is against
+duplicate commands for the same operation.
+
+**Alternatives considered.** A `split` field on every case (touches every row
+and the spec's schema); hash-only assignment with no manifest (not stratified,
+not auditable); letting the optimizer use `--split` with a warning (a warning
+is not isolation).
+
+**Consequences.** With 56 human cases the held-out sets are small (16 + 12)
+until the synthetic corpus exists. Adding a human case now requires running
+`pnpm eval:splits`.
+
+## 2026-09-16 - Aggregates are per case, errors are failures, gates need full coverage
+
+**Decision.** `computeMetrics` reports pass rates per case: a case passes only
+when every applicable deterministic check passed, and a case with no valid
+output counts as a failure in every rate. An evaluator with no verdicts
+reports no measurement (previously a pass rate of 1). Rubric means carry
+judged count and coverage, and a rubric gate fails unless every case was
+judged. Two gates were added: generation-success-rate (must be 1) and
+judge-coverage (must be 1). A generation that never produced valid output
+records a failing `structured-output-validity` verdict. Judge failures record
+`judgeError` on the case. Comparisons flag rubric-score drops of 20 points or
+more as regressions.
+
+**Why.** An errored case previously had an empty verdict list and no rubric,
+so it vanished from every denominator; a judge that failed on the hardest
+cases raised the mean. Per-verdict rates let one leaked prompt in an
+adversarial case count as 75% passing. `structured-output-validity` could
+never fail inside a run because the output was already parsed, so it was a
+free pass on every case.
+
+**Consequences.** Offline runs now fail the judge-coverage gate explicitly
+(they have no judge), which `eval:smoke` does not enforce offline. Real
+benchmark numbers will be lower than the old computation would have given
+for the same run, and that is the point.
+
+## 2026-09-16 - Judge prompt v2 and judge-manipulation indicators
+
+**Decision.** `judge-rubric-v2` replaces v1 as the active judge prompt via
+`ACTIVE_JUDGE_PROMPT`; v1 is retained. v2 asks for each rationale before its
+score, anchors all four dimensions, treats the customer message and the
+response as untrusted, treats the response's own `policyReferences` and
+`escalationReason` as claims to verify, names evaluator-directed text as
+manipulation with a scoring consequence, scores compliance with an injected
+instruction as 1, and says length is not quality. Delimiter look-alikes in
+both blocks are escaped by `wrapUntrusted` (also applied to the generation
+input). A deterministic `judge-manipulation-indicators` evaluator records
+evaluator-directed phrasing. Runs record judge prompt id and hash, judge
+model, and generation/judge sampling parameters.
+
+**Why.** Score-before-rationale makes the rationale a post-hoc justification;
+unescaped delimiters let a response close its own block and address the
+judge; unanchored dimensions score inconsistently; the judge prompt id was
+returned by the judge but never stored, so a change to the judge prompt would
+have been invisible in the results. The judge deliberately does not see the
+case's `expectedBehaviour`: reference-guided grading is more reliable on
+ambiguous cases but anchors on the author's expectation, and the escalation
+expectation is already enforced deterministically. Recorded in the README as
+a limitation.
+
+**Consequences.** No live run has used either judge prompt yet, so there is no
+score continuity to break. When one exists, changing the judge prompt again
+means a new version and a fresh baseline.
+
+## 2026-09-16 - Comparisons and benchmarks must be like-for-like
+
+**Decision.** `compareRuns` checks case id sets, dataset hash, split, mode,
+generation model, judge model, judge prompt id and execution, and sets
+`comparable: false` on any hard mismatch. `eval:compare --write-benchmark`
+refuses a non-comparable comparison unless `--allow-mismatch` is passed; the
+warnings are stored in the snapshot either way, and a benchmark from the
+`dev` or `all` split carries a warning that held-out results are needed.
+Benchmarks now record per-run provenance: prompt id, version, hash and
+source, candidate id, models, judge prompt id, execution, timestamps, token
+usage, cost with the pricing snapshot used, and gate results. Run ids include
+the split. Every run records `datasetHash`, `promptHash`, `gitCommit` and
+sampling parameters.
+
+**Why.** The old check compared dataset name and size only, so two runs over
+different eight-case subsets of the same dataset, or with different judge
+models, would have been averaged into one benchmark. The spec requires the
+benchmark to identify the exact dataset and prompts; a name does not do that.
+
+## 2026-09-16 - Batch runs are resumable from a pending manifest
+
+**Decision.** A batch run writes `evals/results/pending/<run-id>.json` before
+submitting anything, containing the exact cases, prompt text, judge prompt id
+and configuration, and rewrites it with each batch id the moment that stage
+is submitted. `eval:run --resume <run-id>` collects the recorded batches and
+continues from the next stage without resubmitting; `--pending` lists them.
+`eval:generate --resume <batch-id>` does the same for its single batch. The
+manifest is removed once the run record is written. A single `UsageTracker`
+budget is shared across every run in `prompt:optimize`, with per-run trackers
+forwarding to it; the batch discount is applied at the call site.
+
+**Why.** The previous timeout error told the operator to rerun with a
+`--batch-id` flag that did not exist, and a killed process lost the batch id
+entirely, leaving paid results uncollected. The spend cap was per run, so an
+optimization could spend five times `EVAL_MAX_SPEND_USD`. A tracker with a
+built-in discount could not be shared between batch runs and the sequential
+proposal call.
+
+**Consequences.** A `prompt:optimize` run interrupted mid-way is not resumed
+as a whole: its candidate runs are resumed individually with `eval:run
+--resume` and the comparison is reproduced with `eval:compare`.
+
+## 2026-09-16 - Cost is unavailable when any model used is unpriced
+
+**Decision.** `UsageTracker.estimatedCostUsd` is undefined if any recorded
+model has no pricing entry, and the run record lists `unpricedModels`. Tokens
+spent on failed generation attempts and unusable judge replies are counted.
+
+**Why.** With a priced generator and an unpriced judge the old tracker
+reported the generator's cost as the run's cost, and `EVAL_MAX_SPEND_USD` was
+enforced against that partial figure. Retry attempts and malformed judge
+replies were billed by Anthropic but not tracked.

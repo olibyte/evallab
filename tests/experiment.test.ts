@@ -106,9 +106,10 @@ describe("promotion gates", () => {
     const gates = evaluateGates({
       cases: 1,
       errors: 0,
-      rubric: { judgedCases: 0 },
+      rubric: { judgedCases: 0, unjudgedCases: 1, coverage: 0 },
       deterministicPassRate: 1,
       evaluatorPassRates: { "unauthorized-action-claims": 1 },
+      adversarialCases: 0,
       latencyMeanMs: 1,
       latencyMedianMs: 1,
       inputTokens: 0,

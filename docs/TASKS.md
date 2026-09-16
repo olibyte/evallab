@@ -25,7 +25,7 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Seed dataset (human-authored)
 - [x] Adversarial dataset
 - [x] Deterministic evaluators
-- [x] Rubric judge (implemented; never exercised against a live model)
+- [x] Rubric judge (`judge-rubric-v2` active; never exercised against a live model)
 - [x] Automated quality score
 
 ## Phase 4 - Durable eval assets
@@ -78,8 +78,39 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Batch runs costed at the 50% Batch API rate
 - [ ] Chunk batches above the 100,000-request limit (currently refuses with a
       clear error; the corpus is far below the limit)
-- [ ] `--batch-id` resume flag to collect a batch that outlived its poll
-      timeout (the timeout error already prints the id)
+- [x] Resume a batch run after the polling process exits or times out
+      (`eval:run --resume <run-id>`, `eval:run --pending`,
+      `eval:generate --resume <batch-id>`; pending manifests under
+      `evals/results/pending/`)
+- [x] One shared spend budget across every run in `prompt:optimize`
+
+## Benchmark methodology (review of 2026-09-16)
+- [x] Frozen dataset splits (`dev`, `heldout`, `adversarial-holdout`) in
+      `evals/datasets/splits.json`; `pnpm eval:splits` assigns new cases
+- [x] `eval:run --split` (default `holdout`); `prompt:optimize` pinned to `dev`
+      and refuses `--split`; reused baselines must be live dev-split runs of
+      the same prompt over the same cases
+- [x] Candidate prompts that quote dev-case text are rejected; the proposer is
+      told not to special-case the sample
+- [x] Per-case pass rates; errored cases fail every rate; no default pass when
+      an evaluator never ran; rubric gates require full judge coverage;
+      generation-success and judge-coverage gates
+- [x] `structured-output-validity` records a failing verdict for a case with no
+      valid output; judge failures record `judgeError`
+- [x] Comparisons check case ids, dataset hash, split, mode, models and judge
+      prompt; `--write-benchmark` refuses non-comparable runs unless
+      `--allow-mismatch`; rubric-score drops of 20+ points are regressions
+- [x] Benchmarks and runs carry provenance: split, dataset hash, prompt hash,
+      judge prompt id and hash, models, sampling params, git commit, tokens,
+      cost with pricing snapshot, gate results
+- [x] Judge prompt v2: rationale before score, anchored dimensions, escaped
+      delimiters, manipulation handling, policy references treated as claims
+- [x] `judge-manipulation-indicators` deterministic evaluator
+- [x] Cost unavailable when any model is unpriced; retry and malformed-judge
+      tokens counted
+- [x] `--max-cases` takes a stratified subset rather than a file-ordered prefix
+- [ ] Human verification of synthetic case labels once `generated.jsonl`
+      exists (labels are written by the runtime model under test)
 
 ## Outstanding follow-ups
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling

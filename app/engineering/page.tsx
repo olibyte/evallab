@@ -202,7 +202,8 @@ export default function EngineeringPage() {
           <>
             <p className="text-sm text-gray-400">
               Latest snapshot from {benchmark.runDate.slice(0, 10)}, dataset{" "}
-              <code>{benchmark.datasetId}</code> ({benchmark.datasetSize} cases,{" "}
+              <code>{benchmark.datasetId}</code> split{" "}
+              <code>{benchmark.split}</code> ({benchmark.datasetSize} cases,{" "}
               {benchmark.mode} mode), prompts{" "}
               {benchmark.promptIds.map((id) => (
                 <code key={id} className="mr-1">
@@ -211,11 +212,42 @@ export default function EngineeringPage() {
               ))}
               .
             </p>
+            {!benchmark.comparable && (
+              <p className="text-sm text-red-300">
+                The runs in this snapshot are not like-for-like. Treat the
+                numbers as indicative only.
+              </p>
+            )}
             {benchmark.warnings.map((warning) => (
               <p key={warning} className="text-sm text-amber-300">
                 {warning}
               </p>
             ))}
+            {benchmark.runs.length > 0 && (
+              <ul className="flex flex-col gap-1 text-xs text-gray-400">
+                {benchmark.runs.map((run) => (
+                  <li key={run.runId}>
+                    <code>{run.label}</code>: generation{" "}
+                    <code>{run.generationModel}</code>, judge{" "}
+                    <code>{run.judgeModel ?? "none"}</code>
+                    {run.judgePromptId ? (
+                      <>
+                        {" "}
+                        (<code>{run.judgePromptId}</code>)
+                      </>
+                    ) : null}
+                    , {run.usage.inputTokens} in / {run.usage.outputTokens} out
+                    tokens
+                    {run.usage.estimatedCostUsd !== undefined
+                      ? `, $${run.usage.estimatedCostUsd.toFixed(4)}`
+                      : ", cost unavailable"}
+                    , gates{" "}
+                    {run.gates.filter((g) => g.passed).length}/{run.gates.length}{" "}
+                    passed.
+                  </li>
+                ))}
+              </ul>
+            )}
             <pre className="overflow-x-auto rounded border border-gray-800 bg-gray-950 p-3 text-xs text-gray-300">
               {JSON.stringify(benchmark.metrics, null, 2)}
             </pre>
@@ -234,9 +266,11 @@ export default function EngineeringPage() {
           {PROMOTION_GATES.groundednessMean}, unauthorized-action pass rate ≥{" "}
           {PROMOTION_GATES.unauthorizedActionPassRate * 100}%, adversarial
           injection pass rate ≥{" "}
-          {PROMOTION_GATES.injectionAdversarialPassRate * 100}%. These are
-          configuration, not proof of safety, and promotion is always a manual
-          source-code change.
+          {PROMOTION_GATES.injectionAdversarialPassRate * 100}%, every case
+          generated and every case judged. Pass rates are per case, an errored
+          case counts as a failure, and a rubric mean over a partially judged
+          run does not satisfy a gate. These are configuration, not proof of
+          safety, and promotion is always a manual source-code change.
         </p>
       </Section>
 

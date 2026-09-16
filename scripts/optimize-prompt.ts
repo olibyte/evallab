@@ -9,7 +9,12 @@ import { compareRuns } from "@/src/evals/compare";
 import { loadDatasets } from "@/src/evals/dataset";
 import { resolveDataset } from "@/src/evals/datasets-config";
 import { computeMetrics } from "@/src/evals/metrics";
-import { buildRecommendation, proposeCandidates } from "@/src/evals/optimize";
+import {
+  assertBaselineUsable,
+  buildRecommendation,
+  OPTIMIZATION_SPLIT,
+  proposeCandidates,
+} from "@/src/evals/optimize";
 import {
   assertPaidEvalsAllowed,
   resolveCaseLimit,
@@ -17,26 +22,29 @@ import {
 } from "@/src/evals/paid-guard";
 import { loadRun, saveRun } from "@/src/evals/results";
 import { runExperiment } from "@/src/evals/run-experiment";
+import { selectRepresentative, selectSplit } from "@/src/evals/splits";
 import { numberArg, parseArgs } from "./lib/args";
 import { printComparison } from "./lib/report";
 
 const USAGE = `
 Usage: pnpm prompt:optimize [options]
 
-  --dataset <name>    dataset to optimise against       (default: human)
-  --prompt <id>       parent prompt id                  (default: active prompt)
-  --baseline <runId>  reuse an existing baseline run instead of running one
-  --candidates <n>    candidates to propose, 3-5        (default: 4)
-  --execution <how>   sequential | batch                (default: sequential)
+  --dataset <name>    dataset files to draw from            (default: human)
+  --prompt <id>       parent prompt id                      (default: active prompt)
+  --baseline <runId>  reuse an existing dev-split baseline run
+  --candidates <n>    candidates to propose, 3-5            (default: 4)
+  --execution <how>   sequential | batch                    (default: sequential)
   --max-cases <n>     cap cases per run
   --help
 
 This is a paid batch operation: it requires ALLOW_PAID_EVALS=true.
 It never modifies the active production prompt.
 
-An optimization run evaluates the baseline plus every candidate over the
-whole dataset, so it is the heaviest workload here. Batch execution halves
-the cost of those runs; EVAL_USE_BATCH_API=true makes it the default.
+Optimization reads ONLY the "${OPTIMIZATION_SPLIT}" split. There is no flag to
+change that: the held-out and adversarial-holdout splits exist so that the
+final benchmark measures cases the optimizer never saw. Candidates that
+quote dev-case text are rejected. EVAL_MAX_SPEND_USD bounds the whole
+optimization (baseline + proposal + every candidate run), not each run.
 `.trim();
 
 async function main() {
@@ -44,6 +52,11 @@ async function main() {
   if (args.flags.has("help")) {
     console.log(USAGE);
     return;
+  }
+  if (args.values.has("split")) {
+    throw new Error(
+      `prompt:optimize always uses the "${OPTIMIZATION_SPLIT}" split; --split is not accepted.`,
+    );
   }
 
   assertPaidEvalsAllowed("prompt:optimize");
@@ -54,8 +67,12 @@ async function main() {
   if (!prompt) throw new Error(`Unknown support prompt id "${promptId}".`);
 
   const { datasetId, files } = resolveDataset(args.values.get("dataset") ?? "human");
-  const cases = loadDatasets(files);
   const maxCases = resolveCaseLimit(numberArg(args, "max-cases"));
+  const devCases = selectSplit(loadDatasets(files), OPTIMIZATION_SPLIT);
+  const cases = selectRepresentative(devCases, maxCases);
+  if (cases.length === 0) {
+    throw new Error(`Dataset "${datasetId}" has no cases in the ${OPTIMIZATION_SPLIT} split.`);
+  }
   const candidateCount = Math.min(
     5,
     Math.max(3, numberArg(args, "candidates") ?? 4),
@@ -68,15 +85,16 @@ async function main() {
       ? "batch"
       : "sequential";
 
-  const usage = new UsageTracker(env.EVAL_MAX_SPEND_USD);
+  // One budget for the whole optimization; each run reports its own usage.
+  const budget = new UsageTracker(env.EVAL_MAX_SPEND_USD);
   const runConfig = {
     cases,
     datasetId,
     datasetFiles: files,
+    split: OPTIMIZATION_SPLIT,
     mode: "live" as const,
     execution,
-    maxCases,
-    maxSpendUsd: env.EVAL_MAX_SPEND_USD,
+    budget,
     onBatchProgress: (stage: string, status: string, counts: Record<string, number>) =>
       console.log(
         `  [${stage}] ${status} - ${Object.entries(counts)
@@ -89,32 +107,46 @@ async function main() {
   const baseline = baselineRunId
     ? loadRun(baselineRunId)
     : await (async () => {
-        console.log(`Running baseline for ${prompt.id} (${execution})...`);
+        console.log(
+          `Running baseline for ${prompt.id} on ${cases.length} ${OPTIMIZATION_SPLIT} case(s) (${execution})...`,
+        );
         const run = await runExperiment({ ...runConfig, prompt });
         saveRun(run);
         return run;
       })();
+  assertBaselineUsable(baseline, prompt, cases);
 
   const optimizationRunId = `opt-${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`;
 
   console.log(`\nProposing ${candidateCount} candidate(s) from ${baseline.runId}...`);
-  const candidates = await proposeCandidates({
+  const proposal = await proposeCandidates({
     client: createModelClient("generation"),
     prompt,
     baseline,
+    cases,
     optimizationRunId,
     candidateCount,
-    usage,
+    usage: budget,
   });
+  budget.assertWithinBudget();
 
-  for (const candidate of candidates) {
+  for (const rejected of proposal.rejected) {
+    console.log(
+      `  rejected "${rejected.description}": quotes dev case(s) ${rejected.hits.map((h) => h.caseId).join(", ")}`,
+    );
+  }
+  if (proposal.candidates.length === 0) {
+    throw new Error("Every proposed candidate quoted dev-case text; nothing to evaluate.");
+  }
+
+  for (const candidate of proposal.candidates) {
     console.log(`  ${candidate.candidateId}: ${candidate.description}`);
     console.log(`    ${saveCandidate(candidate)}`);
   }
 
   const candidateRuns = [];
-  for (const candidate of candidates) {
-    console.log(`\nEvaluating ${candidate.candidateId}...`);
+  for (const candidate of proposal.candidates) {
+    console.log(`\nEvaluating ${candidate.candidateId} on the ${OPTIMIZATION_SPLIT} split...`);
     const run = await runExperiment({
       ...runConfig,
       prompt: {
@@ -131,7 +163,7 @@ async function main() {
     candidateRuns.push(run);
   }
 
-  console.log("\n=== Comparison ===\n");
+  console.log("\n=== Comparison (dev split) ===\n");
   printComparison(compareRuns([baseline, ...candidateRuns]));
 
   const recommendation = buildRecommendation(
@@ -145,6 +177,9 @@ async function main() {
   console.log("\n=== Recommendation ===\n");
   console.log(recommendation.summary);
   for (const line of recommendation.detail) console.log(`  ${line}`);
+  console.log(
+    `\nOptimization spend: ${budget.estimatedCostUsd === undefined ? `tracked $${budget.trackedSpendUsd.toFixed(4)} (incomplete: unpriced ${budget.unpricedModels.join(", ") || "none"})` : `$${budget.estimatedCostUsd.toFixed(4)}`}`,
+  );
   console.log(
     "\nCandidates are never promoted automatically. To promote, add a new immutable prompt version under src/ai/prompts/support/, update ACTIVE_SUPPORT_PROMPT, record the decision in docs/DECISIONS.md and rerun the regression suite.",
   );
