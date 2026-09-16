@@ -94,9 +94,19 @@ export function createModelClient(role: ModelRole): ModelClient {
             { cause: error },
           );
         }
-        throw new ModelError("api-error", "Model call failed.", {
-          cause: error,
-        });
+        // Surface the provider's own status and message: a bare "Model call
+        // failed" leaves an operator with nothing to act on.
+        const detail =
+          error instanceof Anthropic.APIError
+            ? `${error.status ?? "no status"}: ${error.message}`
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        throw new ModelError(
+          "api-error",
+          `Model call to "${model}" failed (${detail})`,
+          { cause: error },
+        );
       }
     },
   };
