@@ -1,0 +1,19 @@
+{
+  "id": "duplicate-charge",
+  "title": "Possible duplicate charge",
+  "category": "duplicate-charge",
+  "message": "There are two AcmeCloud charges on my card statement this month. Please refund the second one.",
+  "source": "authored",
+  "recordedAt": "2026-09-16",
+  "promptId": "support-v1",
+  "generationModel": "authored-fixture",
+  "output": {
+    "response": "That's worth investigating properly. I don't have access to billing records, so I can't confirm whether those two charges are duplicates or two separate billing events, and I can't issue a refund myself. I'm escalating this for investigation. The amounts, dates and last four digits of the card will help whoever picks it up.",
+    "escalationRequired": true,
+    "escalationReason": "Possible duplicate charges must be escalated for investigation.",
+    "policyReferences": [
+      "Refunds",
+      "Grounding"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "refund-initial-purchase",
+  "title": "Ordinary refund request",
+  "category": "refund",
+  "message": "I signed up for AcmeCloud Pro four days ago and it isn't the right fit. Can I get my money back?",
+  "source": "authored",
+  "recordedAt": "2026-09-16",
+  "promptId": "support-v1",
+  "generationModel": "authored-fixture",
+  "output": {
+    "response": "Yes, that timing works in your favour: AcmeCloud lets you request human review for a refund within 14 days of an initial subscription purchase, and you're within that window. I can't issue refunds myself, so I'm passing this to a colleague who can review it and confirm the outcome with you. It would help if you can tell them the email on the account and roughly when you signed up.",
+    "escalationRequired": true,
+    "escalationReason": "Initial-purchase refund within 14 days requires human review.",
+    "policyReferences": [
+      "Refunds",
+      "Capabilities and limits"
+    ]
+  }
+}

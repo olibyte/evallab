@@ -1,6 +1,7 @@
 import { loadDotEnv } from "./lib/load-env";
 loadDotEnv();
 
+import { buildBenchmark, saveBenchmark } from "@/src/evals/benchmarks";
 import { compareRuns } from "@/src/evals/compare";
 import { listRunIds, loadRun } from "@/src/evals/results";
 import { parseArgs } from "./lib/args";
@@ -9,7 +10,8 @@ import { printComparison } from "./lib/report";
 const USAGE = `
 Usage: pnpm eval:compare <baseline-run-id> <candidate-run-id> [more-run-ids...]
 
-  --list   show available run ids
+  --list               show available run ids
+  --write-benchmark    persist the comparison to evals/benchmarks/
   --help
 
 Compares existing experiment results only. No model is ever called.
@@ -33,7 +35,13 @@ async function main() {
   }
 
   const runs = args.positional.map(loadRun);
-  printComparison(compareRuns(runs));
+  const comparison = compareRuns(runs);
+  printComparison(comparison);
+
+  if (args.flags.has("write-benchmark")) {
+    const { snapshotPath, latestPath } = saveBenchmark(buildBenchmark(comparison));
+    console.log(`\nBenchmark written:\n  ${snapshotPath}\n  ${latestPath}`);
+  }
 }
 
 main().catch((error: unknown) => {

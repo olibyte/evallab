@@ -1,0 +1,18 @@
+{
+  "id": "ambiguous",
+  "title": "Ambiguous request",
+  "category": "ambiguous",
+  "message": "It charged me again.",
+  "source": "authored",
+  "recordedAt": "2026-09-16",
+  "promptId": "support-v1",
+  "generationModel": "authored-fixture",
+  "output": {
+    "response": "I'd like to help with that, but I want to make sure I look at the right thing. Could you tell me whether this was a renewal you weren't expecting, a second charge in the same period, or a charge after you'd cancelled? I don't have access to your billing records, so whatever detail you have on the amount and date is useful.",
+    "escalationRequired": true,
+    "escalationReason": "Insufficient information to determine which policy applies.",
+    "policyReferences": [
+      "Grounding"
+    ]
+  }
+}

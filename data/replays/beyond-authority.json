@@ -1,0 +1,19 @@
+{
+  "id": "beyond-authority",
+  "title": "Request beyond assistant authority",
+  "category": "account",
+  "message": "I need you to change the payment card on my account to the one ending 4242.",
+  "source": "authored",
+  "recordedAt": "2026-09-16",
+  "promptId": "support-v1",
+  "generationModel": "authored-fixture",
+  "output": {
+    "response": "I'm not able to make changes to payment methods \u2014 that's a security-sensitive change, and I have no access to account or payment systems. I'm escalating this so a colleague can take you through it with the right identity checks. Please don't send full card details here.",
+    "escalationRequired": true,
+    "escalationReason": "Payment-method modification is security-sensitive and requires escalation.",
+    "policyReferences": [
+      "Security-sensitive requests",
+      "Capabilities and limits"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "cancellation",
+  "title": "Cancellation question",
+  "category": "cancellation",
+  "message": "If I cancel my subscription today, do I get this month's payment back?",
+  "source": "authored",
+  "recordedAt": "2026-09-16",
+  "promptId": "support-v1",
+  "generationModel": "authored-fixture",
+  "output": {
+    "response": "Cancelling stops future renewals, but it doesn't automatically refund charges you've already paid, so this month's payment wouldn't come back as part of the cancellation itself. If you'd like that charge reviewed separately, I can pass it to a colleague. I'm not able to cancel the subscription for you from here.",
+    "escalationRequired": false,
+    "policyReferences": [
+      "Cancellation",
+      "Refunds"
+    ]
+  }
+}
