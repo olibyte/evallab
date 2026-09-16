@@ -1,14 +1,16 @@
 # BUILD STATE
 
 Current phase: Phases 0-11 implemented, Batch API support, a benchmark
-methodology review, and Claude 5 API compatibility applied; paid and
-deployment work outstanding
+methodology review, Claude 5 API compatibility applied, and live model access
+verified; the paid eval programme and deployment work are outstanding
 Current branch: main
 Last known green commit: see `git log -1` (the working tree on top of it was
 validated as below and is not yet committed)
 Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
 (184 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
-(24 cases, offline), `pnpm eval:splits --check` all pass.
+(24 cases, offline), `pnpm eval:splits --check` all pass. A live two-case
+sequential run against `claude-sonnet-5` and `claude-opus-5` also passed
+(see below).
 
 ## Completed
 
@@ -46,22 +48,34 @@ Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
   Anthropic call path, sequential and batch; nothing is sent unless a caller
   asked for it and the model accepts it. Run records report the sampling
   actually sent. Details in `docs/DECISIONS.md`.
+- Live API smoke (2026-09-16): run
+  `20260916T061945Z-seed-holdout-support-v1-adajy`, generation on
+  `claude-sonnet-5` and judging on `claude-opus-5`, prompt `support-v1`,
+  judge prompt `judge-rubric-v2`, sequential execution. 2 cases, 0 errors,
+  judge coverage 100%, deterministic pass rate 100%, 6810 input / 1084 output
+  tokens, estimated cost $0.0498. A smoke test only, not a benchmark
+  artifact. It confirms that billing works, that the Claude 5 call paths no
+  longer 400 on sampling parameters, and that `judge-rubric-v2` has now been
+  validated against a live model end to end.
 
-## Blocked
+## Outstanding paid work
 
-Anthropic Console credit available: US$20
-Paid evals remain disabled by default.
-No live experiment has yet been run. `ALLOW_PAID_EVALS`
-is deliberately `false`.
+The Anthropic Console balance is funded with US$20 and live access is
+confirmed. `ALLOW_PAID_EVALS` is still `false` by default, so every paid run
+opts in explicitly and stays bounded by `EVAL_MAX_SPEND_USD`.
 
-Blocked: a real synthetic corpus, any live experiment run, real benchmark
-artifacts, recorded replay fixtures, prompt candidate search. All code paths
-exist and are covered by tests against fake sequential and batch clients.
+Still to run against a live model:
 
-Exact commands once credentials exist, in order:
+- synthetic corpus generation
+- prompt optimization (candidate search, dev split only)
+- held-out benchmark
+- adversarial-holdout benchmark
+- real replay fixtures
+
+Exact commands, in order:
 
 ```bash
-# 1. Add credit at console.anthropic.com -> Billing (NOT claude.ai).
+# 1. Credit is already funded at console.anthropic.com -> Billing.
 export ANTHROPIC_API_KEY=...
 export ALLOW_PAID_EVALS=true
 export EVAL_MAX_SPEND_USD=25          # enforced against real tracked spend
@@ -72,7 +86,8 @@ pnpm eval:splits --check
 pnpm eval:generate --plan
 pnpm eval:run --dataset human --max-cases 6              # offline, no cost
 
-# 3. Smallest possible live call, to confirm billing works.
+# 3. DONE 2026-09-16, run 20260916T061945Z-seed-holdout-support-v1-adajy.
+#    Smallest possible live call, to confirm billing works.
 pnpm eval:run --dataset seed --mode live --max-cases 2 --execution sequential
 
 # 4. Corpus, then splits are assigned automatically for the new cases.
@@ -110,13 +125,11 @@ None.
 
 1. Commit the Claude 5 compatibility fix (the working tree is validated but
    uncommitted; `.agents/`, `.claude/` and `skills-lock.json` stay out).
-2. If credentials become available, run the paid sequence above in order and
-   commit `evals/datasets/generated.jsonl`, `evals/datasets/splits.json` and
-   the `evals/benchmarks/` artifacts. Step 3, the two-case live sequential
-   run, is the check that the 400 on `temperature` is gone; it was never
-   reached before. Then review a sample of synthetic case
+2. Run the remaining paid sequence above from step 4 onward and commit
+   `evals/datasets/generated.jsonl`, `evals/datasets/splits.json` and the
+   `evals/benchmarks/` artifacts. Then review a sample of synthetic case
    labels by hand; they are written by the model under test.
-3. Otherwise, implement the persistent `UsageStore` backed by `DATABASE_URL`
+3. Independently of the paid work, implement the persistent `UsageStore` backed by `DATABASE_URL`
    so public live inference can be enabled safely on multi-instance hosting.
 
 ## Relevant notes
@@ -133,9 +146,6 @@ None.
 - Offline runs carry no rubric scores and fail the `judge-coverage` gate by
   design; `eval:smoke` enforces only the deterministic and generation-success
   gates offline.
-- Neither judge prompt has been used against a live model, so switching to
-  `judge-rubric-v2` broke no score continuity. Changing it again once live
-  results exist means a new version and a fresh baseline.
 - `evals/benchmarks/latest.json` does not exist yet and must never be created
   by hand.
 - `evals/results/pending/` holds resumable batch manifests; `evals/results/`
