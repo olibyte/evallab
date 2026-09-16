@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { compareRuns } from "../src/evals/compare";
 import { planBatches, synthenticCaseId } from "../src/evals/generate-cases";
 import { computeMetrics, evaluateGates } from "../src/evals/metrics";
@@ -14,14 +14,36 @@ import type { EvalCase } from "../src/schemas/eval-case";
 
 const cases: EvalCase[] = loadDatasets(["seed.jsonl", "adversarial.jsonl"]).slice(0, 12);
 
+// Every variable a test in this file reads or sets. Each test starts from a
+// known state regardless of the caller's shell, and the caller's values are
+// restored afterwards.
+const ENV_KEYS = ["ALLOW_PAID_EVALS", "EVAL_MAX_CASES", "ANTHROPIC_API_KEY"] as const;
+let ambientEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
+
+beforeEach(() => {
+  ambientEnv = {};
+  for (const key of ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) ambientEnv[key] = value;
+    delete process.env[key];
+  }
+  resetEnvCache();
+});
+
 afterEach(() => {
-  delete process.env.ALLOW_PAID_EVALS;
-  delete process.env.EVAL_MAX_CASES;
+  for (const key of ENV_KEYS) {
+    const value = ambientEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   resetEnvCache();
 });
 
 describe("paid execution controls", () => {
   it("refuses a live run unless paid evals are explicitly enabled", async () => {
+    // The guard must fire before any client is built, so the outcome cannot
+    // depend on whether ANTHROPIC_API_KEY happens to exist.
+    process.env.ALLOW_PAID_EVALS = "false";
     resetEnvCache();
     await expect(
       runExperiment({

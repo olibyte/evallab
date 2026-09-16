@@ -2,14 +2,19 @@
 
 Current phase: Phases 0-11 implemented, Batch API support, a benchmark
 methodology review, Claude 5 API compatibility applied, live model access
-verified, and the first paid synthetic generation run diagnosed and fixed;
-the rest of the paid eval programme and deployment work are outstanding
+verified, the first paid synthetic generation run diagnosed and fixed, and
+its flawed 60-case corpus removed pending regeneration; the rest of the paid
+eval programme and deployment work are outstanding
 Current branch: main
-Last known green commit: see `git log -1` (the working tree on top of it was
-validated as below and is not yet committed)
+Last known green commit: 407af31 (`post mortem fixes`). The working tree on
+top of it removes the collapsed-plan synthetic corpus and its split entries,
+updates these docs, and makes `tests/experiment.test.ts` independent of the
+caller's `ALLOW_PAID_EVALS`; it was validated as below.
 Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
-(198 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
-(24 cases, offline), `pnpm eval:splits --check` (116 assigned) all pass. A
+(198 passing), `pnpm eval:splits --check` (56 assigned, after the corpus
+removal) pass on the current tree. Earlier the same day, before the removal,
+`pnpm build`, `pnpm test:e2e` (6 passing) and `pnpm eval:smoke` (24 cases,
+offline) also passed; none of them reads `generated.jsonl`. A
 live two-case sequential run against `claude-sonnet-5` and `claude-opus-5`
 also passed (see below). No paid call was made while diagnosing the
 generation run; `ALLOW_PAID_EVALS` stayed `false`.
@@ -79,7 +84,9 @@ opts in explicitly and stays bounded by `EVAL_MAX_SPEND_USD`.
 
 Still to run against a live model:
 
-- synthetic corpus generation (ran once, under-delivered; see the post-mortem)
+- synthetic corpus generation (ran once, under-delivered; its 60 cases were
+  removed on 2026-09-16 and regeneration under the fixed plan is pending; see
+  the post-mortem)
 - prompt optimization (candidate search, dev split only)
 - held-out benchmark
 - adversarial-holdout benchmark
@@ -104,8 +111,10 @@ pnpm eval:run --dataset human --max-cases 6              # offline, no cost
 pnpm eval:run --dataset seed --mode live --max-cases 2 --execution sequential
 
 # 4. Corpus, then splits are assigned automatically for the new cases.
-#    RAN 2026-09-16 and under-delivered (60 of 400); causes fixed since.
-#    Unset EVAL_MAX_CASES first or the plan is trimmed to it, and check the
+#    RAN 2026-09-16 and under-delivered (60 of 400); causes fixed since and
+#    those 60 cases removed, so generated.jsonl is absent until this reruns.
+#    Unset EVAL_MAX_CASES first or the plan is trimmed to it, confirm the
+#    generator prints "0 existing case(s) will be preserved", and check the
 #    printed rejection breakdown before trusting the yield.
 pnpm eval:generate --plan --ordinary 200 --edge 100 --adversarial 100
 pnpm eval:generate --ordinary 200 --edge 100 --adversarial 100
@@ -140,10 +149,12 @@ None.
 
 ## Open questions from the generation post-mortem
 
-- The 60 committed synthetic cases were produced under the collapsed plan, so
-  they cover roughly eight distinct prompts. They are valid and their splits
-  are frozen, but the corpus is narrower than 60 suggests. Regenerating is a
-  paid operation and has not been run.
+- The 60 synthetic cases produced under the collapsed plan (roughly eight
+  distinct prompts) were removed on 2026-09-16 along with their split
+  entries; `evals/datasets/splits.json` is back to the 56 human assignments
+  from commit 8d91234, unchanged. `generated.jsonl` does not exist until the
+  corpus is regenerated, which is a paid operation and has not been run. See
+  `docs/DECISIONS.md` for why removal rather than keeping them.
 - `.env` currently sets `ANTHROPIC_MODEL=claude-haiku-4-5-20251001` and
   `EVAL_MAX_CASES=60`, neither of which matches the documented paid sequence
   (`claude-sonnet-5`, no case cap). The $0.5433 cost of the generation run is
@@ -153,24 +164,25 @@ None.
 
 ## Next recommended task
 
-1. Commit the Claude 5 compatibility fix and the generation post-mortem fixes
-   (the working tree is validated but uncommitted; `.agents/`, `.claude/` and
-   `skills-lock.json` stay out).
-2. Decide whether to regenerate the synthetic corpus under the fixed plan
-   before benchmarking. The existing 60 cases are usable but narrow, and the
-   run that produced them cost $0.5433 for what should now cost about the
-   same and yield several hundred. Then run the remaining paid sequence from
-   step 4 onward and commit `evals/datasets/generated.jsonl`,
-   `evals/datasets/splits.json` and the `evals/benchmarks/` artifacts. Review
-   a sample of synthetic case labels by hand; they are written by the model
-   under test.
-3. Independently of the paid work, implement the persistent `UsageStore` backed by `DATABASE_URL`
+1. Regenerate the synthetic corpus under the fixed plan (paid). The flawed
+   60 cases are gone, so the generator starts from an empty corpus and every
+   accepted case gets a fresh split assignment. Before running: unset
+   `EVAL_MAX_CASES` (`.env` currently sets it to 60, which would cap the plan
+   to 60 again) and set `ANTHROPIC_MODEL` to the documented generation model
+   (`.env` currently names Haiku 4.5). The previous run cost $0.5433 for what
+   should now cost about the same and yield several hundred. Then run the
+   remaining paid sequence from step 4 onward and commit
+   `evals/datasets/generated.jsonl`, `evals/datasets/splits.json` and the
+   `evals/benchmarks/` artifacts. Review a sample of synthetic case labels by
+   hand; they are written by the model under test.
+2. Independently of the paid work, implement the persistent `UsageStore` backed by `DATABASE_URL`
    so public live inference can be enabled safely on multi-instance hosting.
 
 ## Relevant notes
 
-- Splits are frozen in `evals/datasets/splits.json` (dev 61, heldout 33,
-  adversarial-holdout 22 over 56 human and 60 synthetic cases). Adding a case
+- Splits are frozen in `evals/datasets/splits.json` (dev 28, heldout 16,
+  adversarial-holdout 12 over the 56 human cases; the synthetic entries were
+  removed with their cases on 2026-09-16). Adding a case
   requires `pnpm eval:splits`. Because assignment is incremental and frozen, a
   from-scratch rebuild does *not* reproduce the manifest once a group has
   grown; the tests assert reassignment is a no-op and that each group stays

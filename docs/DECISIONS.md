@@ -395,7 +395,8 @@ elements does not.
 **Consequences.** The 60 cases in `evals/datasets/generated.jsonl` came from
 roughly eight distinct prompts under the collapsed plan, so the corpus is
 narrower than 60 cases suggests, and its splits are frozen. Regenerating is a
-paid operation and has not been run. No number in this entry comes from a new
+paid operation and has not been run. (Superseded later the same day: the 60
+cases were removed; see the entry below.) No number in this entry comes from a new
 model call: the diagnosis is arithmetic over the reported totals plus offline
 replay of the failure shape against the committed corpus.
 
@@ -418,3 +419,51 @@ freezing the requirement, so the test was the stale side.
 **Consequences.** The test's original purpose - catching a hand edit that
 moves a case between splits - is now served by the dev-fraction bound rather
 than by rebuild equality, which is a weaker but still meaningful check.
+
+## 2026-09-16 - The collapsed-plan synthetic corpus is removed, not kept
+
+**Decision.** The 60 synthetic cases generated under the collapsed plan are
+deleted from `evals/datasets/generated.jsonl` (the file is removed, not
+truncated) and their 60 `gen-*` entries are dropped from
+`evals/datasets/splits.json` by restoring that file from commit 8d91234. The
+56 human cases and their assignments are untouched. The corpus will be
+regenerated under the fixed generator and plan as a paid operation.
+
+**Why.** The corpus covered roughly eight distinct prompts, so any benchmark
+or optimization run over it would have been anchored to a narrow sample
+while reporting a size of 60. `eval:generate` only ever appends to the
+existing file and never regenerates or overwrites, so keeping the cases would
+have meant carrying them into every future corpus. Removing them is the only
+way to get a corpus that reflects the fixed plan alone.
+
+Removing the `gen-*` split entries does not break the frozen-split invariant.
+The invariant is that an assigned case never moves; `assignSplits` skips
+every case that already has an entry and stratifies only among the unassigned
+ones, so the human entries cannot change and are byte-identical to the
+8d91234 manifest. The removed ids no longer name a case. No optimizer or
+benchmark ever consumed the synthetic dev split (`evals/candidates/` and
+`evals/benchmarks/` are empty; the only results are seed-holdout runs), so
+nothing that was ever used has moved. A regenerated case whose input text is
+identical to a removed one would hash to the same id and receive a fresh
+assignment; that is acceptable for the same reason.
+
+The file is deleted rather than emptied because
+`tests/generation-diagnostics.test.ts` reads `generated.jsonl` when it exists
+and falls back to the seed corpus when it does not; a zero-byte file fails
+JSON parsing at load. Every loader treats a missing file as an empty dataset.
+
+**Alternatives considered.** Keeping the 60 cases and generating on top of
+them: the narrow sample would persist, and its share of the corpus would only
+shrink, never vanish. `git revert` of the commit that added them: that commit
+also carries the generator fixes. Editing the manifest by hand to strip the
+`gen-*` keys: equivalent in outcome, but restoring the 8d91234 file is
+verifiable with `git diff 8d91234 -- evals/datasets/splits.json`, whereas
+`pnpm eval:splits --check` only counts unassigned cases and reports success
+even when stale entries remain.
+
+**Consequences.** Until regeneration runs, `generated.jsonl` does not exist,
+`pnpm eval:splits --check` reports 56 cases (dev 28, heldout 16,
+adversarial-holdout 12), and the `all` and `generated` dataset presets equal
+the human corpus. The regeneration must unset `EVAL_MAX_CASES` (currently 60
+in `.env`) or the plan is trimmed to 60 again, and the generator should print
+"0 existing case(s) will be preserved" before it submits.

@@ -134,9 +134,13 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       batches now reach all seven categories
 - [x] `case-generator-v2` with an explicit, length-bounded output contract
       (v1 retained)
+- [x] Remove the 60 collapsed-plan cases and their split entries
+      (2026-09-16; `generated.jsonl` deleted, `splits.json` restored to the
+      56 human assignments from 8d91234, unchanged)
 - [ ] Regenerate the synthetic corpus under the fixed plan (BLOCKED: paid).
-      The committed 60 cases came from ~8 distinct prompts under the collapsed
-      plan, so the corpus is narrower than its size suggests.
+      The removed 60 cases came from ~8 distinct prompts, so a corpus of that
+      size would have been narrower than it looked. Unset `EVAL_MAX_CASES`
+      before running or the plan is trimmed to 60 again.
 
 ## Outstanding follow-ups
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling
