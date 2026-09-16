@@ -195,6 +195,8 @@ export async function proposeCandidates(
       options.candidateCount,
     ),
     maxOutputTokens: 8000,
+    // Diverse proposals, not a reproducible one. Dropped by the client on
+    // models that have removed sampling parameters.
     temperature: 1,
   });
   options.usage.record(result.model, result.inputTokens, result.outputTokens);

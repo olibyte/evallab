@@ -1,12 +1,13 @@
 # BUILD STATE
 
-Current phase: Phases 0-11 implemented, Batch API support, and a benchmark
-methodology review applied; paid and deployment work outstanding
+Current phase: Phases 0-11 implemented, Batch API support, a benchmark
+methodology review, and Claude 5 API compatibility applied; paid and
+deployment work outstanding
 Current branch: main
 Last known green commit: see `git log -1` (the working tree on top of it was
 validated as below and is not yet committed)
 Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
-(172 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
+(184 passing), `pnpm build`, `pnpm test:e2e` (6 passing), `pnpm eval:smoke`
 (24 cases, offline), `pnpm eval:splits --check` all pass.
 
 ## Completed
@@ -40,6 +41,11 @@ Last validation run: 2026-09-16 - `pnpm lint`, `pnpm typecheck`, `pnpm test`
   run/benchmark provenance; judge prompt v2 with escaped delimiters and
   manipulation handling; resumable batch runs; shared optimization budget.
   Details in `docs/DECISIONS.md`.
+- Claude 5 API compatibility (2026-09-16): `supportsSamplingParams` in
+  `src/ai/client/model-capabilities.ts` gates `temperature` for every
+  Anthropic call path, sequential and batch; nothing is sent unless a caller
+  asked for it and the model accepts it. Run records report the sampling
+  actually sent. Details in `docs/DECISIONS.md`.
 
 ## Blocked
 
@@ -102,11 +108,13 @@ None.
 
 ## Next recommended task
 
-1. Commit the methodology review (the working tree is validated but
+1. Commit the Claude 5 compatibility fix (the working tree is validated but
    uncommitted; `.agents/`, `.claude/` and `skills-lock.json` stay out).
 2. If credentials become available, run the paid sequence above in order and
    commit `evals/datasets/generated.jsonl`, `evals/datasets/splits.json` and
-   the `evals/benchmarks/` artifacts. Then review a sample of synthetic case
+   the `evals/benchmarks/` artifacts. Step 3, the two-case live sequential
+   run, is the check that the 400 on `temperature` is gone; it was never
+   reached before. Then review a sample of synthetic case
    labels by hand; they are written by the model under test.
 3. Otherwise, implement the persistent `UsageStore` backed by `DATABASE_URL`
    so public live inference can be enabled safely on multi-instance hosting.
@@ -117,6 +125,11 @@ None.
   adversarial-holdout 12 over the 56 human cases). Adding a human case
   requires `pnpm eval:splits`; a test asserts the manifest matches the
   deterministic assignment and covers every case.
+- Sampling parameters are omitted, not defaulted: `claude-sonnet-5` and
+  `claude-opus-5` reject `temperature`, `top_p` and `top_k` with a 400, and
+  use adaptive thinking rather than `budget_tokens`. Eval runs still ask for
+  `DETERMINISTIC_TEMPERATURE`, which reaches only models that accept it, so
+  Claude 5 runs sample at the model default and the run record says so.
 - Offline runs carry no rubric scores and fail the `judge-coverage` gate by
   design; `eval:smoke` enforces only the deterministic and generation-success
   gates offline.

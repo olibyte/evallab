@@ -5,6 +5,7 @@ import {
   type ModelRole,
 } from "./anthropic";
 import { ModelError } from "./errors";
+import { samplingParamsFor } from "./model-capabilities";
 
 /** Anthropic caps a single batch at 100,000 requests. */
 export const MAX_BATCH_REQUESTS = 100_000;
@@ -18,6 +19,7 @@ export type BatchRequest = {
   system: string;
   userContent: string;
   maxOutputTokens?: number;
+  /** Dropped for models that have removed sampling parameters. */
   temperature?: number;
 };
 
@@ -99,7 +101,7 @@ export function createBatchModelClient(role: ModelRole): BatchModelClient {
             params: {
               model,
               max_tokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-              temperature: request.temperature ?? 0,
+              ...samplingParamsFor(model, { temperature: request.temperature }),
               system: request.system,
               messages: [{ role: "user", content: request.userContent }],
             },

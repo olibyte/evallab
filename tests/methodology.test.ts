@@ -351,8 +351,10 @@ describe("live sequential run records", () => {
     expect(result.config).toMatchObject({
       split: "holdout",
       judgePromptId: "judge-rubric-v2",
-      generationParams: { temperature: 0, maxOutputTokens: 1024 },
-      judgeParams: { temperature: 0, maxOutputTokens: 800 },
+      // The fake models are not models that accept `temperature`, so the
+      // run record must not claim one was sent. See tests/model-compat.
+      generationParams: { maxOutputTokens: 1024 },
+      judgeParams: { maxOutputTokens: 800 },
     });
     expect(result.config.datasetHash).toMatch(/^[0-9a-f]{64}$/);
     expect(result.config.promptHash).toMatch(/^[0-9a-f]{64}$/);

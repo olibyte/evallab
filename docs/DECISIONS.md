@@ -283,3 +283,37 @@ spent on failed generation attempts and unusable judge replies are counted.
 reported the generator's cost as the run's cost, and `EVAL_MAX_SPEND_USD` was
 enforced against that partial figure. Retry attempts and malformed judge
 replies were billed by Anthropic but not tracked.
+
+## 2026-09-16 - Sampling parameters are omitted, not defaulted
+
+**Decision.** `src/ai/client/model-capabilities.ts` owns one predicate,
+`supportsSamplingParams(model)`, and both Anthropic clients spread
+`samplingParamsFor(model, { temperature })` into the request rather than
+setting a field. Nothing is sent unless a caller asked for a value *and* the
+model accepts one. The predicate is an allow-list of models that still take
+sampling parameters (Opus/Sonnet 4.0-4.6, Haiku 4.x, Claude 3.x); every other
+identifier, including one this code has never seen, is treated as a model
+that has removed them. Manual thinking configuration is never sent: Claude 5
+uses adaptive thinking, and `thinking: { type: "enabled", budget_tokens: N }`
+is rejected the same way. Eval runs still *ask* for `temperature: 0` through
+`DETERMINISTIC_TEMPERATURE`, so a model that honours it stays reproducible.
+
+**Why.** The first live Sonnet 5 smoke request failed with `400
+invalid_request_error: temperature is deprecated for this model` before
+consuming any tokens. Both clients defaulted the field to `0` whenever a
+caller omitted it, so every call path — request, judge, synthetic generation,
+prompt optimization, and Batch API payloads — carried a parameter the current
+models reject. An allow-list rather than a deny-list of Claude 5 ids is the
+direction that fails safe: omitting the field is accepted by every model,
+sending it to one that has removed it fails the whole request, and model ids
+are environment-overridable.
+
+**Consequences.** Run records report the sampling that was actually sent:
+`generationParams.temperature` and `judgeParams.temperature` are now optional
+and absent on Claude 5, where the run used the model's own default. Runs on
+those models are therefore not bit-reproducible, which the record now states
+rather than implying otherwise with a `temperature: 0` that never left the
+process. Benchmark methodology and model selection are unchanged.
+`tests/model-compat.test.ts` asserts on the payloads that reach the SDK, so a
+reintroduced `temperature`, `top_p`, `top_k` or `thinking` field fails
+offline instead of on the first paid call.

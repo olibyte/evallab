@@ -53,11 +53,21 @@ export const experimentRunSchema = z.object({
     candidateId: z.string().optional(),
     judgePromptId: z.string().optional(),
     judgePromptHash: z.string().optional(),
+    /**
+     * The sampling actually sent. `temperature` is absent for models that
+     * have removed it, where the run used the model's own default.
+     */
     generationParams: z
-      .object({ temperature: z.number(), maxOutputTokens: z.number() })
+      .object({
+        temperature: z.number().optional(),
+        maxOutputTokens: z.number(),
+      })
       .optional(),
     judgeParams: z
-      .object({ temperature: z.number(), maxOutputTokens: z.number() })
+      .object({
+        temperature: z.number().optional(),
+        maxOutputTokens: z.number(),
+      })
       .optional(),
     gitCommit: z.string().optional(),
     mode: z.enum(["live", "offline"]),

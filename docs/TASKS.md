@@ -109,6 +109,10 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Cost unavailable when any model is unpriced; retry and malformed-judge
       tokens counted
 - [x] `--max-cases` takes a stratified subset rather than a file-ordered prefix
+- [x] Claude 5 API compatibility: no `temperature`/`top_p`/`top_k` and no
+      manual thinking configuration on any Anthropic call path, including
+      Batch API payloads; text selected by content-block type; regression
+      tests assert on the payloads reaching the SDK
 - [ ] Human verification of synthetic case labels once `generated.jsonl`
       exists (labels are written by the runtime model under test)
 

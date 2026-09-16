@@ -3,6 +3,7 @@ import type {
   BatchModelClient,
   PollOptions,
 } from "@/src/ai/client/batch";
+import { DETERMINISTIC_TEMPERATURE } from "@/src/ai/client/anthropic";
 import { buildGenerationUserContent } from "@/src/ai/generation/generate-support-response";
 import { extractJsonObject } from "@/src/ai/generation/json";
 import {
@@ -160,6 +161,7 @@ export async function executeBatchRun(
     customId: evalCase.id,
     system: prompt.systemPrompt,
     userContent: buildGenerationUserContent(evalCase.input),
+    temperature: DETERMINISTIC_TEMPERATURE,
   }));
 
   const first = await runStage(
@@ -229,6 +231,7 @@ export async function executeBatchRun(
       system: judgePrompt.systemPrompt,
       userContent: buildJudgeUserContent(evalCase.input, outcome.output!),
       maxOutputTokens: JUDGE_MAX_OUTPUT_TOKENS,
+      temperature: DETERMINISTIC_TEMPERATURE,
     }));
 
   if (judgeRequests.length === 0 && !stages.judge) {

@@ -1,9 +1,18 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getEnv } from "@/src/config/env";
 import { ModelError } from "./errors";
+import { samplingParamsFor } from "./model-capabilities";
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
+
+/**
+ * The sampling setting eval runs ask for, so a rerun of the same cases is as
+ * reproducible as the model allows. It reaches the API only on models that
+ * still accept `temperature`; Claude 5 removed the parameter and samples at
+ * its own default, which is why a run record states what was actually sent.
+ */
+export const DETERMINISTIC_TEMPERATURE = 0;
 
 export type ModelRole = "generation" | "judge";
 
@@ -12,6 +21,11 @@ export type ModelCallOptions = {
   userContent: string;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  /**
+   * Only reaches the API on a model that still accepts sampling parameters;
+   * see `samplingParamsFor`. Left unset, nothing is sent and the server
+   * default applies.
+   */
   temperature?: number;
 };
 
@@ -68,7 +82,7 @@ export function createModelClient(role: ModelRole): ModelClient {
           {
             model,
             max_tokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-            temperature: options.temperature ?? 0,
+            ...samplingParamsFor(model, { temperature: options.temperature }),
             system: options.system,
             messages: [{ role: "user", content: options.userContent }],
           },

@@ -32,6 +32,8 @@ export type JudgeRequest = {
   output: SupportResponse;
   client: ModelClient;
   timeoutMs?: number;
+  /** Dropped by the client for models that have removed sampling params. */
+  temperature?: number;
   /** Defaults to the active judge prompt; runs record which one was used. */
   judgePrompt?: PromptDefinition;
 };
@@ -105,6 +107,7 @@ export async function judgeResponse(
     userContent: buildJudgeUserContent(request.message, request.output),
     maxOutputTokens: JUDGE_MAX_OUTPUT_TOKENS,
     timeoutMs: request.timeoutMs,
+    temperature: request.temperature,
   });
 
   return {

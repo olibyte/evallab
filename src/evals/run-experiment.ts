@@ -1,8 +1,10 @@
 import {
   createModelClient,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  DETERMINISTIC_TEMPERATURE,
   type ModelRole,
 } from "@/src/ai/client/anthropic";
+import { samplingParamsFor } from "@/src/ai/client/model-capabilities";
 import {
   createBatchModelClient,
   type BatchModelClient,
@@ -213,6 +215,7 @@ export async function runExperiment(
           message: evalCase.input,
           prompt,
           client: generationClient,
+          temperature: DETERMINISTIC_TEMPERATURE,
         });
         output = generated.output;
         caseInputTokens = generated.inputTokens;
@@ -254,6 +257,7 @@ export async function runExperiment(
           output,
           client: judgeClient,
           judgePrompt,
+          temperature: DETERMINISTIC_TEMPERATURE,
         });
         rubric = judged.rubric;
         automatedQualityScore = calculateQualityScore(judged.rubric);
@@ -293,6 +297,10 @@ export async function runExperiment(
   }
 
   const judgeModel = judgeClient?.model ?? batchJudgeClient?.model;
+  const generationModel =
+    generationClient?.model ??
+    batchGenerationClient?.model ??
+    "offline-deterministic-stub";
 
   return {
     runId,
@@ -311,20 +319,30 @@ export async function runExperiment(
       candidateId: options.candidateId,
       judgePromptId: judgeModel ? judgePrompt.id : undefined,
       judgePromptHash: judgeModel ? hashText(judgePrompt.systemPrompt) : undefined,
+      // What was actually sent, not what was asked for: on a model that has
+      // removed `temperature` the field is dropped, and a run record that
+      // still claimed `temperature: 0` would misdescribe the experiment.
       generationParams: live
-        ? { temperature: 0, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS }
+        ? {
+            ...samplingParamsFor(generationModel, {
+              temperature: DETERMINISTIC_TEMPERATURE,
+            }),
+            maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+          }
         : undefined,
       judgeParams: judgeModel
-        ? { temperature: 0, maxOutputTokens: JUDGE_MAX_OUTPUT_TOKENS }
+        ? {
+            ...samplingParamsFor(judgeModel, {
+              temperature: DETERMINISTIC_TEMPERATURE,
+            }),
+            maxOutputTokens: JUDGE_MAX_OUTPUT_TOKENS,
+          }
         : undefined,
       gitCommit: currentGitCommit(),
       mode,
       execution,
       batchIds,
-      generationModel:
-        generationClient?.model ??
-        batchGenerationClient?.model ??
-        "offline-deterministic-stub",
+      generationModel,
       judgeModel,
       maxCases: options.maxCases,
     },

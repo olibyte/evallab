@@ -220,6 +220,7 @@ export async function generateSyntheticCases(
       system: caseGeneratorPromptV1.systemPrompt,
       userContent: buildBatchPrompt(spec),
       maxOutputTokens: 2000,
+      // Varied cases, not reproducible ones; dropped where unsupported.
       temperature: 1,
     });
     options.usage.record(result.model, result.inputTokens, result.outputTokens);
@@ -279,6 +280,7 @@ export async function generateSyntheticCasesBatch(
         system: caseGeneratorPromptV1.systemPrompt,
         userContent: buildBatchPrompt(spec),
         maxOutputTokens: 2000,
+        // Varied cases, not reproducible ones; dropped where unsupported.
         temperature: 1,
       })),
     );

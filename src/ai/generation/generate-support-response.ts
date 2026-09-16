@@ -24,6 +24,8 @@ export type GenerationRequest = {
   client: ModelClient;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  /** Dropped by the client for models that have removed sampling params. */
+  temperature?: number;
 };
 
 export type GenerationOutcome = {
@@ -68,6 +70,7 @@ export async function generateSupportResponse(
       userContent,
       maxOutputTokens: request.maxOutputTokens,
       timeoutMs: request.timeoutMs,
+      temperature: request.temperature,
     });
     inputTokens += result.inputTokens;
     outputTokens += result.outputTokens;
