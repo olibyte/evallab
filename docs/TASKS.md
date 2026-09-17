@@ -114,8 +114,11 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       manual thinking configuration on any Anthropic call path, including
       Batch API payloads; text selected by content-block type; regression
       tests assert on the payloads reaching the SDK
-- [ ] Human verification of synthetic case labels once `generated.jsonl`
-      exists (labels are written by the runtime model under test)
+- [x] Full audit of synthetic case labels against the support policy
+      (2026-09-17, Fable 5.1, every case read; corrections in
+      `docs/DECISIONS.md`). Labels were written by the runtime model family
+- [ ] Human spot-check of the corrected synthetic labels before the corpus is
+      declared final
 
 ## Synthetic generation post-mortem (run of 2026-09-16)
 - [x] Surface `stopReason` on `ModelCallResult` and `BatchItemResult` so a
@@ -137,10 +140,32 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Remove the 60 collapsed-plan cases and their split entries
       (2026-09-16; `generated.jsonl` deleted, `splits.json` restored to the
       56 human assignments from 8d91234, unchanged)
-- [ ] Regenerate the synthetic corpus under the fixed plan (BLOCKED: paid).
-      The removed 60 cases came from ~8 distinct prompts, so a corpus of that
-      size would have been narrower than it looked. Unset `EVAL_MAX_CASES`
-      before running or the plan is trimmed to 60 again.
+- [x] Regenerate the synthetic corpus under the fixed plan (2026-09-16,
+      batch run: 400 planned, 400 returned, 398 accepted, 2 within-run
+      duplicates, $0.5129)
+
+## Synthetic corpus audit remediation (2026-09-17)
+- [x] `forbidden-claim-detection` excuses negated refusals and attributed
+      quotations; genuine assertions and unattributed quoted claims still fail
+      (`src/ai/evaluators/forbidden-claims.ts`, `tests/forbidden-claims.test.ts`)
+- [x] Escalation labels corrected under one written rule (86 changes)
+- [x] Category corrected from content (129), adversarial flags fixed (6)
+- [x] `expectedBehaviour` entries that asserted non-policy facts rewritten (38);
+      overly broad or dead `forbiddenClaims` fixed (4)
+- [x] 27 audit deletions plus 2 dev-side twins of heldout cases; no `input` edited
+- [x] Synthetic split entries discarded and assigned once on the corrected
+      corpus; 56 human entries verified unchanged; assignments frozen from here
+- [x] Coverage cases for pasted PII / full card numbers, the exact 14-day
+      boundary, non-English messages, hostile tone, judge-directed requests,
+      forwarded-content injection (18 curated cases, hash-assigned splits)
+- [x] Secret-extraction convention: pure extraction attempts carry
+      `escalationRequired: false` (22 changes)
+- [x] Adversarial-holdout leakage review at the attack-family level; 12 dev
+      twins of human holdout scenarios deleted, not moved
+- [x] `tests/splits.test.ts` dev-fraction guard accounts for documented dev
+      deletions instead of loosening its slack
+- [ ] Commit `evals/datasets/generated.jsonl`, `evals/datasets/splits.json`,
+      the evaluator change and the test change together (the freeze point)
 
 ## Outstanding follow-ups
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling

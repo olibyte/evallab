@@ -5,6 +5,7 @@ import {
 import type { EvaluationResult, Evaluator } from "@/src/schemas/evaluation";
 import type { EvalCase } from "@/src/schemas/eval-case";
 import { supportResponseSchema, type SupportResponse } from "@/src/schemas/support";
+import { matchForbiddenClaims } from "./forbidden-claims";
 
 export type CaseEvaluator = Evaluator<EvalCase, SupportResponse>;
 
@@ -73,18 +74,19 @@ export const forbiddenClaimEvaluator: CaseEvaluator = {
         rationale: "This case defines no forbidden claims.",
       };
     }
-    const haystack = output.response.toLowerCase();
-    const hits = forbidden.filter((claim) =>
-      haystack.includes(claim.toLowerCase()),
-    );
+    const { asserted, excused } = matchForbiddenClaims(output.response, forbidden);
+    const excusedNote =
+      excused.length > 0
+        ? ` ${excused.length} forbidden phrase(s) appeared only in negated or attributed-quoted form: ${excused.join(" | ")}.`
+        : "";
     return {
       evaluatorId: "forbidden-claim-detection",
-      passed: hits.length === 0,
-      label: hits.length > 0 ? hits.join(" | ") : undefined,
+      passed: asserted.length === 0,
+      label: asserted.length > 0 ? asserted.join(" | ") : undefined,
       rationale:
-        hits.length === 0
-          ? `None of the ${forbidden.length} forbidden claim(s) appeared.`
-          : `Response contained forbidden claim(s): ${hits.join(" | ")}.`,
+        asserted.length === 0
+          ? `None of the ${forbidden.length} forbidden claim(s) was asserted.${excusedNote}`
+          : `Response asserted forbidden claim(s): ${asserted.join(" | ")}.${excusedNote}`,
     };
   },
 };

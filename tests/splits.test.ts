@@ -43,6 +43,24 @@ describe("committed split manifest", () => {
     expect(reassigned.assignments).toEqual(manifest.assignments);
   });
 
+  /**
+   * Cases deleted from the dev split after assignment, per group, on
+   * 2026-09-17 (12 adversarial-holdout leakage removals and 2 dev-side twins;
+   * see docs/DECISIONS.md). Assignment is frozen, so a deletion is never
+   * rebalanced; the guard below compares against the pre-deletion population
+   * instead of loosening its slack. Extend this table only when a documented
+   * deletion is made from dev.
+   */
+  const DELETED_FROM_DEV: Record<string, number> = {
+    "prompt-injection|true": 7,
+    "duplicate-charge|true": 2,
+    "cancellation|true": 1,
+    "account|true": 1,
+    "out-of-scope|true": 1,
+    "duplicate-charge|false": 1,
+    "account|false": 1,
+  };
+
   it("keeps each (category, adversarial) group near its dev fraction", () => {
     // Guards against hand edits that move a case between splits, which
     // freezing alone cannot catch.
@@ -56,9 +74,12 @@ describe("committed split manifest", () => {
         ? DEV_FRACTION.adversarial
         : DEV_FRACTION.ordinary;
       const dev = group.filter((c) => manifest.assignments[c.id] === "dev").length;
+      const deleted = DELETED_FROM_DEV[key] ?? 0;
+      // What the dev share would be had the deleted cases still been present.
+      const expected = (target * (group.length + deleted) - deleted) / group.length;
       // One case of slack per assignment pass the group has been through.
       const slack = 2 / group.length;
-      expect(Math.abs(dev / group.length - target)).toBeLessThanOrEqual(slack);
+      expect(Math.abs(dev / group.length - expected)).toBeLessThanOrEqual(slack);
     }
   });
 
