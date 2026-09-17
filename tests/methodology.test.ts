@@ -271,6 +271,7 @@ describe("optimizer isolation", () => {
       optimizationRunId: "opt-test",
       candidateCount: 2,
       usage: new UsageTracker(),
+      save: false,
     });
     expect(result.rejected.map((r) => r.description)).toEqual(["memorises"]);
     expect(result.candidates.map((c) => c.candidateId)).toEqual(["opt-test-c1"]);
@@ -354,7 +355,7 @@ describe("live sequential run records", () => {
       // The fake models are not models that accept `temperature`, so the
       // run record must not claim one was sent. See tests/model-compat.
       generationParams: { maxOutputTokens: 1024 },
-      judgeParams: { maxOutputTokens: 800 },
+      judgeParams: { maxOutputTokens: 1600 },
     });
     expect(result.config.datasetHash).toMatch(/^[0-9a-f]{64}$/);
     expect(result.config.promptHash).toMatch(/^[0-9a-f]{64}$/);

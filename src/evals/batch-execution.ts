@@ -8,7 +8,10 @@ import { buildGenerationUserContent } from "@/src/ai/generation/generate-support
 import { extractJsonObject } from "@/src/ai/generation/json";
 import {
   buildJudgeUserContent,
+  isTruncated,
+  JUDGE_MALFORMED_MESSAGE,
   JUDGE_MAX_OUTPUT_TOKENS,
+  JUDGE_TRUNCATED_MESSAGE,
 } from "@/src/ai/evaluators/rubric-judge";
 import { ACTIVE_JUDGE_PROMPT } from "@/src/ai/prompts/judges";
 import type { PromptDefinition } from "@/src/ai/prompts/types";
@@ -117,6 +120,11 @@ function parseGeneration(result: BatchItemResult): BatchGenerationOutcome {
       };
 }
 
+/**
+ * Mirrors `parseJudgeOutput` for a batch item: a reply that stopped on
+ * `max_tokens` is truncation, reported as such and never parsed; anything
+ * else that fails the schema is malformed. Both leave the case unjudged.
+ */
 function parseJudge(result: BatchItemResult): BatchJudgeOutcome {
   if (result.error !== undefined || result.text === undefined) {
     return {
@@ -125,11 +133,18 @@ function parseJudge(result: BatchItemResult): BatchJudgeOutcome {
       outputTokens: result.outputTokens,
     };
   }
+  if (isTruncated(result.stopReason)) {
+    return {
+      error: JUDGE_TRUNCATED_MESSAGE,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    };
+  }
   const parsed = rubricEvaluationSchema.safeParse(extractJsonObject(result.text));
   return parsed.success
     ? { rubric: parsed.data, inputTokens: result.inputTokens, outputTokens: result.outputTokens }
     : {
-        error: "Judge did not return a valid rubric evaluation.",
+        error: JUDGE_MALFORMED_MESSAGE,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
       };

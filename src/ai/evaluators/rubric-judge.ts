@@ -10,7 +10,26 @@ import {
 } from "@/src/schemas/evaluation";
 import type { SupportResponse } from "@/src/schemas/support";
 
-export const JUDGE_MAX_OUTPUT_TOKENS = 800;
+/**
+ * Output ceiling for one judge call, on both the sequential and the Batch
+ * API paths. `judge-rubric-v2` writes a rationale before every score, and
+ * at the previous ceiling of 800 tokens 44 of 229 replies in the first dev
+ * baseline (2026-09-17) stopped on `max_tokens`. Truncation is a judge
+ * failure, never a partial score: see `parseJudgeOutput`.
+ */
+export const JUDGE_MAX_OUTPUT_TOKENS = 1600;
+
+/** The stop reason the API reports when a reply hit the output ceiling. */
+export const TRUNCATED_STOP_REASON = "max_tokens";
+
+export const JUDGE_TRUNCATED_MESSAGE =
+  "Judge reply was truncated at the output ceiling (stop_reason=max_tokens); no rubric was scored.";
+
+export const JUDGE_MALFORMED_MESSAGE = "Judge did not return a valid rubric evaluation.";
+
+export function isTruncated(stopReason: string | undefined): boolean {
+  return stopReason === TRUNCATED_STOP_REASON;
+}
 
 /**
  * Rationale precedes score in every dimension so the score is produced
@@ -70,21 +89,47 @@ export class JudgeOutputError extends ModelError {
     readonly judgeModel: string,
     readonly inputTokens: number,
     readonly outputTokens: number,
+    message: string = JUDGE_MALFORMED_MESSAGE,
   ) {
-    super("malformed-output", "Judge did not return a valid rubric evaluation.", { cause });
+    super("malformed-output", message, { cause });
     this.name = "JudgeOutputError";
   }
 }
 
-/** Parses judge text; a malformed reply is a failure, never a default score. */
+/**
+ * A reply cut off by the output ceiling. It is reported separately from a
+ * malformed reply because the fix is different (raise the ceiling, not the
+ * prompt), and it is never parsed: whatever JSON survived the cut is not
+ * the judge's verdict.
+ */
+export class JudgeTruncatedError extends JudgeOutputError {
+  constructor(judgeModel: string, inputTokens: number, outputTokens: number) {
+    super(undefined, judgeModel, inputTokens, outputTokens, JUDGE_TRUNCATED_MESSAGE);
+    this.name = "JudgeTruncatedError";
+  }
+}
+
+/**
+ * Parses judge text; a malformed reply is a failure, never a default score.
+ * A reply that stopped on `max_tokens` is refused before parsing, even when
+ * the text happens to parse, so a truncated rationale can never be scored.
+ */
 export function parseJudgeOutput(
   text: string,
-  usage: { model: string; inputTokens: number; outputTokens: number } = {
+  usage: {
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    stopReason?: string;
+  } = {
     model: "unknown",
     inputTokens: 0,
     outputTokens: 0,
   },
 ): RubricEvaluation {
+  if (isTruncated(usage.stopReason)) {
+    throw new JudgeTruncatedError(usage.model, usage.inputTokens, usage.outputTokens);
+  }
   const parsed = rubricEvaluationSchema.safeParse(extractJsonObject(text));
   if (!parsed.success) {
     // The tokens were spent even though the reply is unusable; callers that

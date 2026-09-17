@@ -644,3 +644,112 @@ adversarial-holdout 57). Adversarial groups sit below their 50% dev target
 by design (prompt-injection 27 of 62 in dev). Assignments are frozen from
 here. The corpus is ready to freeze subject to a human spot-check of the
 model-audited labels.
+
+## 2026-09-17 - Judge truncation is a named failure; the proposer gets its own timeout
+
+**Decision.** Two changes after the first live `prompt:optimize`, which ran
+on the frozen corpus at ee39b58 with Sonnet 5 as both generation model and
+development judge (Opus 5 stays the benchmark judge in `.env`):
+
+1. `JUDGE_MAX_OUTPUT_TOKENS` rises from 800 to 1600. The constant is the
+   single source for the sequential path (`judgeResponse`) and the Batch API
+   path (`executeBatchRun`), so both change together. A judge reply whose
+   `stop_reason` is `max_tokens` is refused before parsing and recorded as
+   the case's `judgeError` ("Judge reply was truncated at the output ceiling
+   (stop_reason=max_tokens); no rubric was scored."), via
+   `JudgeTruncatedError` on the sequential path and the same message on the
+   batch path. It is never salvaged, partially parsed or scored, and it
+   counts against judge coverage exactly as a malformed reply does. The
+   judge prompt `judge-rubric-v2` is unchanged.
+2. The candidate-proposal call in `proposeCandidates` passes
+   `OPTIMIZER_PROPOSAL_TIMEOUT_MS = 300_000`. No other call site changes;
+   the client default stays 30 s.
+
+**Why.** The baseline run `20260917T040103Z-all-dev-support-v1-d0rbl`
+(229 dev cases, batch, $1.6477) judged only 185 cases. Reading the judge
+batch back from the API showed all 44 unparsed replies stopped on
+`max_tokens` at exactly 800 output tokens and all 185 parsed replies ended
+on `end_turn`. The v2 prompt puts a rationale before each score, and the
+unjudged cases skewed to refund, cancellation and duplicate-charge, where
+rationales run longest, so the reported means were biased toward easier
+cases and the judge-coverage gate could never pass. The run then died with
+"Model call timed out after 30000ms" on the proposal call, which asks for
+8000 output tokens and cannot finish in 30 s; the path had never been
+exercised live. The truncated replies had been reported as "did not return
+a valid rubric evaluation", which pointed at the prompt rather than the
+ceiling.
+
+**Alternatives rejected.** Salvaging scores from a truncated reply: the
+score follows the rationale, so a cut-off reply may carry a score written
+before the judge finished reasoning, and a partial rubric would understate
+the failure. Re-judging only the 44 cases of the saved baseline: there is no
+re-judge path and adding one for a single run is not worth the surface;
+the next optimization starts from a fresh baseline. Raising the client
+default timeout: it is sized for one customer response and a slow proposal
+should not loosen application inference.
+
+**Validation.** `tests/judge-truncation.test.ts` (parse refusal even when the
+text parses, no salvage of a cut reply, malformed kept distinct, sequential
+run leaves the case unjudged with the truncation message and fails
+coverage, 1600 sent on the sequential path), `tests/batch.test.ts` (same on
+the batch path, 1600 on every judge request), `tests/optimize.test.ts`
+(proposal call carries 300 s and 8000 tokens; ordinary generation sets no
+timeout), `tests/call-timeouts.test.ts` (30 s default and explicit override
+reach the SDK; `stop_reason` is forwarded). `tests/methodology.test.ts`
+provenance expectation updated to 1600. Lint, typecheck, the full suite
+(248 tests) and build pass.
+
+**Consequences.** Judge cost per case rises where rationales are long; at the
+batch rate a 229-case dev run is estimated at about $2.0 instead of $1.65.
+The saved baseline is not reusable for optimization. Run records still show
+the ceiling actually sent in `judgeParams.maxOutputTokens`, so a run at the
+old ceiling is distinguishable from a new one.
+
+
+## 2026-09-17 - The proposal reply is persisted, truncation is named, ceiling 16000
+
+**Decision.** Three changes to `proposeCandidates` after the second live
+`prompt:optimize` (run from the fresh baseline
+`20260917T044437Z-all-dev-support-v1-leqx2`) failed with "Prompt optimizer
+did not return valid candidate proposals" and left nothing to diagnose:
+
+1. Every proposal reply is saved to
+   `evals/results/proposals/<optimizationRunId>.json` (model, tokens,
+   `stop_reason`, ceiling, raw text, and a `failure` line when it could not
+   be used). It is paid work and the only evidence when the proposer fails.
+   Tests pass `save: false`.
+2. A reply with `stop_reason=max_tokens` is refused before parsing, exactly
+   as a judge reply is, with its own message and the tokens it spent. A
+   reply that fails the schema now reports the schema issues and the stop
+   reason instead of a bare sentence.
+3. `OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS` rises from 8000 to 16000 and
+   `OPTIMIZER_PROPOSAL_TIMEOUT_MS` from 300 s to 600 s, on the proposal
+   call only. Ordinary inference keeps the 30 s client default and its own
+   ceiling; `tests/optimize.test.ts` asserts both.
+
+**Why.** Sonnet 5 runs adaptive thinking when no `thinking` parameter is
+sent, and thinking tokens count against `max_tokens`. Four full system
+prompts are about 3500 tokens, but the proposer also reasons over a
+13,000-character failure sample before writing them, so 8000 tokens is not
+a safe ceiling and a cut-off reply is unparseable JSON. Whether the
+2026-09-17 failure was truncation or an escaping error cannot be known,
+because the reply was discarded; the record makes the next failure a fact
+rather than a guess. The 600 s timeout follows from the ceiling: 16000
+output tokens at Sonnet 5 throughput can exceed 300 s.
+
+**Alternatives rejected.** Structured outputs (`output_config.format`) on
+the shared client: it would guarantee valid JSON but changes the shared
+client surface for one call, and the failure was not yet shown to be an
+escaping problem. Streaming the proposal: same objection; a longer explicit
+timeout is enough for one call at this size.
+
+**Validation.** `tests/optimize.test.ts` (600 s and 16000 on the proposal
+call only; truncation refused even when the text parses, with the tokens
+still counted against the budget; malformed reply names the schema path
+and stop reason), `tests/methodology.test.ts` opts out of saving. Lint,
+typecheck, the full suite (250 tests) and build pass.
+
+**Consequences.** A failed proposal costs at most the 16000-token ceiling
+at Sonnet 5 rates (about $0.16 plus input). `evals/results/proposals/`
+gains one small file per optimization run; it is gitignored like the runs
+and kept out of the run listing.

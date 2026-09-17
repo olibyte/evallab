@@ -168,6 +168,30 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       the evaluator change and the test change together (the freeze point)
 
 ## Outstanding follow-ups
+- [x] `prompt:optimize` proposer: explicit 300 s timeout on the proposal
+      call only (`OPTIMIZER_PROPOSAL_TIMEOUT_MS`; the first live run died at
+      the 30 s client default on 2026-09-17; `tests/optimize.test.ts`,
+      `tests/call-timeouts.test.ts`)
+- [x] Judge output ceiling raised from 800 to 1600 on the sequential and
+      Batch API paths; `stop_reason=max_tokens` reported as judge truncation,
+      never parsed or scored, counted against coverage (44 of 229 baseline
+      judge replies truncated on 2026-09-17; `tests/judge-truncation.test.ts`,
+      `tests/batch.test.ts`)
+- [x] Rerun the dev-only `prompt:optimize` from a fresh baseline (done
+      2026-09-17: baseline `20260917T044437Z-all-dev-support-v1-leqx2`,
+      candidates `opt-20260917T050501Z-c1..c4`, $8.77 total; no candidate
+      passed every gate, none promoted; see `docs/BUILD_STATE.md`)
+- [x] `prompt:optimize` proposer: raw reply persisted under
+      `evals/results/proposals/`, `stop_reason=max_tokens` reported as
+      truncation, schema errors named, ceiling 16000 / timeout 600 s on that
+      call only (`tests/optimize.test.ts`)
+- [ ] Decide the next dev-only step: the injection-adversarial gate (95%)
+      is unreachable while `unauthorized-action-claims` and
+      `forbidden-claim-detection` flag negated phrasing ("I can't confirm it
+      was sent to your card"); review those two matchers before another
+      paid search
+- [ ] Consider a combined candidate (c1's "never claim a completed action"
+      rule plus c2's generic-refusal rule) for the next dev-only search
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling
       public live inference on multi-instance hosting; in-memory store cannot
       enforce a true global daily cap)

@@ -1,5 +1,8 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import type { ModelClient } from "@/src/ai/client/anthropic";
+import { isTruncated } from "@/src/ai/evaluators/rubric-judge";
 import { ModelError } from "@/src/ai/client/errors";
 import { extractJsonObject } from "@/src/ai/generation/json";
 import { promptOptimizerPromptV1 } from "@/src/ai/prompts/judges/prompt-optimizer-v1";
@@ -9,11 +12,65 @@ import type { EvalCase } from "@/src/schemas/eval-case";
 import { caseVerdict } from "./compare";
 import type { PromptCandidate } from "./candidates";
 import { evaluateGates, type RunMetrics } from "./metrics";
-import type { ExperimentRun } from "./results";
+import { RESULTS_DIR, type ExperimentRun } from "./results";
 import type { UsageTracker } from "./paid-guard";
 
 /** The only split prompt optimization is allowed to read. */
 export const OPTIMIZATION_SPLIT = "dev";
+
+/**
+ * Output ceiling for the one proposal call. Several full system prompts plus,
+ * on Claude 5 models, the adaptive thinking that precedes them: thinking
+ * tokens count against `max_tokens`. The second live `prompt:optimize`
+ * (2026-09-17) got an unparseable proposal at 8000, so the ceiling is now
+ * 16000 and a reply that stops on `max_tokens` is reported as truncation
+ * rather than as a malformed proposal.
+ */
+export const OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS = 16_000;
+
+/**
+ * The proposal call writes several complete system prompts in one reply and
+ * cannot finish inside the client's 30 s default, which is sized for one
+ * customer response. The first live `prompt:optimize` (2026-09-17) died here
+ * with "Model call timed out after 30000ms". This ceiling applies to the
+ * proposal call only; application inference keeps the default.
+ */
+export const OPTIMIZER_PROPOSAL_TIMEOUT_MS = 600_000;
+
+export const PROPOSAL_TRUNCATED_MESSAGE =
+  "Prompt optimizer reply was truncated at the output ceiling (stop_reason=max_tokens); no candidates were read from it.";
+
+/**
+ * The raw proposal reply, saved under evals/results/proposals whether or not it parsed:
+ * it is paid work and the only evidence when the proposer fails.
+ */
+export type ProposalRecord = {
+  optimizationRunId: string;
+  baselineRunId: string;
+  createdAt: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  stopReason?: string;
+  maxOutputTokens: number;
+  text: string;
+  /** Set when the reply could not be used. */
+  failure?: string;
+};
+
+/** Kept apart from the runs so a run listing never offers a proposal as a run. */
+export const PROPOSALS_DIR = path.join(RESULTS_DIR, "proposals");
+
+export function proposalRecordPath(optimizationRunId: string): string {
+  return path.join(PROPOSALS_DIR, `${optimizationRunId}.json`);
+}
+
+function saveProposalRecord(record: ProposalRecord): string {
+  mkdirSync(PROPOSALS_DIR, { recursive: true });
+  const filePath = proposalRecordPath(record.optimizationRunId);
+  writeFileSync(filePath, JSON.stringify(record, null, 2) + "\n", "utf8");
+  return filePath;
+}
 
 const proposalSchema = z.object({
   candidates: z
@@ -174,6 +231,8 @@ export type ProposeOptions = {
   optimizationRunId: string;
   candidateCount: number;
   usage: UsageTracker;
+  /** Persist the raw reply under evals/results (default true; tests opt out). */
+  save?: boolean;
 };
 
 export type ProposalResult = {
@@ -194,23 +253,51 @@ export async function proposeCandidates(
       failures,
       options.candidateCount,
     ),
-    maxOutputTokens: 8000,
+    maxOutputTokens: OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS,
+    timeoutMs: OPTIMIZER_PROPOSAL_TIMEOUT_MS,
     // Diverse proposals, not a reproducible one. Dropped by the client on
     // models that have removed sampling parameters.
     temperature: 1,
   });
   options.usage.record(result.model, result.inputTokens, result.outputTokens);
 
-  const parsed = proposalSchema.safeParse(extractJsonObject(result.text));
-  if (!parsed.success) {
+  const createdAt = new Date().toISOString();
+  const record: ProposalRecord = {
+    optimizationRunId: options.optimizationRunId,
+    baselineRunId: options.baseline.runId,
+    createdAt,
+    model: result.model,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    stopReason: result.stopReason,
+    maxOutputTokens: OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS,
+    text: result.text,
+  };
+
+  if (isTruncated(result.stopReason)) {
+    record.failure = PROPOSAL_TRUNCATED_MESSAGE;
+    const saved = options.save === false ? undefined : saveProposalRecord(record);
     throw new ModelError(
       "malformed-output",
-      "Prompt optimizer did not return valid candidate proposals.",
-      { cause: parsed.error },
+      `${PROPOSAL_TRUNCATED_MESSAGE} The reply used ${result.outputTokens} output tokens against a ceiling of ${OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS}.${saved ? ` Raw reply saved to ${saved}.` : ""}`,
     );
   }
 
-  const createdAt = new Date().toISOString();
+  const parsed = proposalSchema.safeParse(extractJsonObject(result.text));
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    record.failure = `Prompt optimizer did not return valid candidate proposals: ${issues}`;
+    const saved = options.save === false ? undefined : saveProposalRecord(record);
+    throw new ModelError(
+      "malformed-output",
+      `${record.failure} (stop_reason=${result.stopReason ?? "unknown"}, ${result.outputTokens} output tokens).${saved ? ` Raw reply saved to ${saved}.` : ""}`,
+      { cause: parsed.error },
+    );
+  }
+  if (options.save !== false) saveProposalRecord(record);
+
   const rejected: ProposalResult["rejected"] = [];
   const candidates: PromptCandidate[] = [];
 

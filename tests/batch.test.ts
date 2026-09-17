@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { toItemResult } from "../src/ai/client/batch";
 import { resetEnvCache } from "../src/config/env";
-import { computeMetrics } from "../src/evals/metrics";
+import {
+  JUDGE_MAX_OUTPUT_TOKENS,
+  JUDGE_TRUNCATED_MESSAGE,
+} from "../src/ai/evaluators/rubric-judge";
+import { computeMetrics, evaluateGates } from "../src/evals/metrics";
 import { BATCH_DISCOUNT_MULTIPLIER, estimateCostUsd } from "../src/evals/pricing";
 import { runExperiment } from "../src/evals/run-experiment";
 import type { EvalCase } from "../src/schemas/eval-case";
@@ -166,6 +170,40 @@ describe("batch experiment runs", () => {
     expect(unjudged?.rubric).toBeUndefined();
     expect(unjudged?.automatedQualityScore).toBeUndefined();
     expect(computeMetrics(result).rubric.judgedCases).toBe(2);
+  });
+
+  it("reports a judge reply that stopped on max_tokens as truncation, unscored", async () => {
+    const result = await run(
+      (request) =>
+        request.system === "system"
+          ? { text: GENERATION }
+          : { text: RUBRIC, stopReason: request.customId === "b-2" ? "max_tokens" : "end_turn" },
+      [],
+    );
+
+    // The text parses, and is refused anyway: a cut-off rationale is not a verdict.
+    const truncated = result.cases.find((c) => c.caseId === "b-2");
+    expect(truncated?.output).toBeDefined();
+    expect(truncated?.rubric).toBeUndefined();
+    expect(truncated?.automatedQualityScore).toBeUndefined();
+    expect(truncated?.judgeError).toBe(JUDGE_TRUNCATED_MESSAGE);
+    expect(truncated?.outputTokens).toBe(120);
+
+    const metrics = computeMetrics(result);
+    expect(metrics.rubric.judgedCases).toBe(2);
+    expect(metrics.rubric.unjudgedCases).toBe(1);
+    expect(evaluateGates(metrics).find((g) => g.id === "judge-coverage")?.passed).toBe(false);
+  });
+
+  it("submits every judge request with the 1600-token ceiling", async () => {
+    const submitted: SubmittedBatch[] = [];
+    await run((request) => ({ text: request.system === "system" ? GENERATION : RUBRIC }), submitted);
+    const judgeBatch = submitted.find((b) => b.batchId.includes("judge"));
+    expect(judgeBatch?.requests).toHaveLength(3);
+    for (const request of judgeBatch!.requests) {
+      expect(request.maxOutputTokens).toBe(JUDGE_MAX_OUTPUT_TOKENS);
+      expect(request.maxOutputTokens).toBe(1600);
+    }
   });
 
   it("bills a batch run at the discounted rate", async () => {
