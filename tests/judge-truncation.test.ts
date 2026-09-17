@@ -29,17 +29,18 @@ const GENERATION = JSON.stringify({
 
 const output = JSON.parse(GENERATION);
 
-const usage = { model: "fake-judge-model", inputTokens: 100, outputTokens: 1600 };
+const usage = { model: "fake-judge-model", inputTokens: 100, outputTokens: 4096 };
 
 /**
  * In the first dev baseline (2026-09-17) 44 of 229 judge replies stopped on
- * `max_tokens` at the old 800-token ceiling and were reported as malformed.
+ * `max_tokens` at the old 800-token ceiling and were reported as malformed;
+ * at 1600, 1 to 3 per run still did. The ceiling is now 4096.
  * A truncated reply is a judge failure in its own right: named as such,
  * never salvaged, never scored, and counted against judge coverage.
  */
 describe("judge truncation", () => {
-  it("raises the output ceiling to 1600 tokens", () => {
-    expect(JUDGE_MAX_OUTPUT_TOKENS).toBe(1600);
+  it("sets the output ceiling to 4096 tokens", () => {
+    expect(JUDGE_MAX_OUTPUT_TOKENS).toBe(4096);
   });
 
   it("refuses a reply that stopped on max_tokens even when its text parses", () => {
@@ -84,16 +85,16 @@ describe("judge truncation", () => {
     const error = caught as JudgeTruncatedError;
     expect(error).toBeInstanceOf(JudgeOutputError);
     expect(error.judgeModel).toBe("fake-judge-model");
-    expect(error.outputTokens).toBe(1600);
+    expect(error.outputTokens).toBe(4096);
   });
 
-  it("sequential judgeResponse sends the 1600 ceiling and surfaces truncation", async () => {
+  it("sequential judgeResponse sends the 4096 ceiling and surfaces truncation", async () => {
     const recorded: Recorded[] = [];
     const client = fakeModelClient("judge", [{ text: RUBRIC, stopReason: "max_tokens" }], recorded);
     await expect(judgeResponse({ message: "hi", output, client })).rejects.toThrow(
       JudgeTruncatedError,
     );
-    expect(recorded[0]?.maxOutputTokens).toBe(1600);
+    expect(recorded[0]?.maxOutputTokens).toBe(4096);
   });
 });
 
@@ -169,6 +170,6 @@ describe("truncated judge inside a sequential live run", () => {
 
     const judgeCalls = recorded.filter((r) => r.role === "judge");
     expect(judgeCalls).toHaveLength(2);
-    for (const call of judgeCalls) expect(call.maxOutputTokens).toBe(1600);
+    for (const call of judgeCalls) expect(call.maxOutputTokens).toBe(4096);
   });
 });

@@ -82,6 +82,40 @@ describe("matchForbiddenClaims: attributed customer quotations are excused", () 
   });
 });
 
+/**
+ * Phrasings from the 2026-09-17 dev optimization: policy-correct refusals
+ * whose forbidden phrase sat inside a coordinated object or a longer
+ * complement and was counted as asserted on every candidate.
+ */
+describe("matchForbiddenClaims: refusal scope covers coordinated objects", () => {
+  const CARD = "sent to your card";
+  const REVIEW = "no further review is needed";
+
+  it.each([
+    ["I can't claim a refund has been processed or sent to your card.", CARD],
+    [
+      "I can't confirm or verify refund status, processing, or whether funds have been sent to your card.",
+      CARD,
+    ],
+    ["I can't confirm that a refund has been processed or that no further review is needed.", REVIEW],
+    ["I can't confirm the amount, the date, or that these are duplicate charges.", DUP],
+    ["I don't have access to billing systems, so I can't confirm or verify a refund status, and I can't claim a refund has been processed or sent to your card.", CARD],
+  ])("excuses: %s", (text, claim) => {
+    expect(matchForbiddenClaims(text, [claim])).toEqual({ asserted: [], excused: [claim] });
+  });
+
+  it.each([
+    ["I can't check the date, and your refund has been processed.", REFUND],
+    ["I can't confirm the cancellation; your refund has been processed.", REFUND],
+    ["I can't confirm the amount, but the funds were sent to your card.", CARD],
+    ["I can't verify the log, so it has been sent to your card.", CARD],
+    ["I can't confirm the date. No further review is needed.", REVIEW],
+    ["I can't confirm the amount, and no further review is needed.", REVIEW],
+  ])("still asserts when a negation sits in an unrelated clause: %s", (text, claim) => {
+    expect(matchForbiddenClaims(text, [claim]).asserted).toEqual([claim]);
+  });
+});
+
 describe("matchForbiddenClaims: bookkeeping", () => {
   it("reports a claim as asserted when any occurrence is asserted", () => {
     const text = "I can't confirm your refund has been processed. Actually, your refund has been processed.";

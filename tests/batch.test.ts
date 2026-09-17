@@ -195,14 +195,14 @@ describe("batch experiment runs", () => {
     expect(evaluateGates(metrics).find((g) => g.id === "judge-coverage")?.passed).toBe(false);
   });
 
-  it("submits every judge request with the 1600-token ceiling", async () => {
+  it("submits every judge request with the 4096-token ceiling", async () => {
     const submitted: SubmittedBatch[] = [];
     await run((request) => ({ text: request.system === "system" ? GENERATION : RUBRIC }), submitted);
     const judgeBatch = submitted.find((b) => b.batchId.includes("judge"));
     expect(judgeBatch?.requests).toHaveLength(3);
     for (const request of judgeBatch!.requests) {
       expect(request.maxOutputTokens).toBe(JUDGE_MAX_OUTPUT_TOKENS);
-      expect(request.maxOutputTokens).toBe(1600);
+      expect(request.maxOutputTokens).toBe(4096);
     }
   });
 

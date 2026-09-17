@@ -13,11 +13,14 @@ import type { SupportResponse } from "@/src/schemas/support";
 /**
  * Output ceiling for one judge call, on both the sequential and the Batch
  * API paths. `judge-rubric-v2` writes a rationale before every score, and
- * at the previous ceiling of 800 tokens 44 of 229 replies in the first dev
- * baseline (2026-09-17) stopped on `max_tokens`. Truncation is a judge
- * failure, never a partial score: see `parseJudgeOutput`.
+ * on Claude 5 judges adaptive thinking counts against the same ceiling. At
+ * 800 tokens 44 of 229 replies in the first dev baseline (2026-09-17)
+ * stopped on `max_tokens`; at 1600, 1 to 3 replies per 229-case run still
+ * did, and each one failed the judge-coverage gate for the whole run.
+ * Truncation is a judge failure, never a partial score: see
+ * `parseJudgeOutput`.
  */
-export const JUDGE_MAX_OUTPUT_TOKENS = 1600;
+export const JUDGE_MAX_OUTPUT_TOKENS = 4096;
 
 /** The stop reason the API reports when a reply hit the output ceiling. */
 export const TRUNCATED_STOP_REASON = "max_tokens";

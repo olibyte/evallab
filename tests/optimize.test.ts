@@ -7,6 +7,7 @@ import {
 import { fakeBatchClient } from "./helpers/fake-batch-client";
 import { UsageTracker } from "../src/evals/paid-guard";
 import {
+  assertBaselineUsable,
   buildRecommendation,
   OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS,
   OPTIMIZER_PROPOSAL_TIMEOUT_MS,
@@ -14,7 +15,8 @@ import {
   proposeCandidates,
 } from "../src/evals/optimize";
 import type { RunMetrics } from "../src/evals/metrics";
-import type { ExperimentRun } from "../src/evals/results";
+import type { CaseResult, ExperimentRun } from "../src/evals/results";
+import type { EvalCase } from "../src/schemas/eval-case";
 import { generateSupportResponse } from "../src/ai/generation/generate-support-response";
 import { fakeModelClient, type Recorded } from "./helpers/fake-model-client";
 
@@ -312,5 +314,160 @@ describe("proposeCandidates call settings", () => {
         save: false,
       }),
     ).rejects.toThrow(/candidates\.0\.systemPrompt.*stop_reason=end_turn/);
+  });
+});
+
+/**
+ * Reusing a baseline with `--baseline` must be refused unless every dev
+ * case was generated and judged. The 2026-09-17 runs are the reference
+ * points: the first baseline judged 185 of 229 (44 truncated at 800), the
+ * second 226 of 229 (2 truncated at 1600, 1 generation failure). Neither
+ * can anchor a candidate comparison, because a mean over a subset is not
+ * the metric the gates are defined on. Quality is deliberately not checked.
+ */
+describe("assertBaselineUsable measurement completeness", () => {
+  const prompt = {
+    id: "support-v1",
+    version: 1,
+    description: "d",
+    createdAt: "2026-01-01",
+    systemPrompt: "You are a support assistant.",
+  };
+
+  const devCases: EvalCase[] = Array.from({ length: 229 }, (_, i) => ({
+    id: `dev-${i}`,
+    category: "refund",
+    input: `Case ${i}`,
+    expected: { escalationRequired: true, expectedBehaviour: "Escalates." },
+    adversarial: i % 5 === 0,
+    difficulty: "medium",
+    source: "synthetic",
+  }));
+
+  type Score = 1 | 2 | 3 | 4 | 5;
+  const rubric = (score: Score) => ({
+    policyCompliance: { rationale: "r", score },
+    groundedness: { rationale: "r", score },
+    helpfulness: { rationale: "r", score },
+    tone: { rationale: "r", score },
+  });
+
+  function caseResult(
+    evalCase: EvalCase,
+    shape: { generated: boolean; judged: boolean; score?: Score },
+  ): CaseResult {
+    const score: Score = shape.score ?? 5;
+    return {
+      caseId: evalCase.id,
+      category: evalCase.category,
+      adversarial: evalCase.adversarial,
+      difficulty: evalCase.difficulty,
+      input: evalCase.input,
+      output: shape.generated
+        ? { response: "I can escalate this for review.", escalationRequired: true, policyReferences: [] }
+        : undefined,
+      error: shape.generated ? undefined : "Generation did not return valid structured output.",
+      deterministic: [
+        {
+          evaluatorId: "structured-output-validity",
+          passed: shape.generated,
+          rationale: shape.generated ? "ok" : "No valid structured output",
+        },
+      ],
+      rubric: shape.generated && shape.judged ? rubric(score) : undefined,
+      judgeError:
+        shape.generated && !shape.judged
+          ? "Judge reply was truncated at the output ceiling (stop_reason=max_tokens); no rubric was scored."
+          : undefined,
+      automatedQualityScore: shape.generated && shape.judged ? score * 20 : undefined,
+      latencyMs: 1,
+      inputTokens: 10,
+      outputTokens: 10,
+    };
+  }
+
+  function run(
+    shapes: (index: number) => { generated: boolean; judged: boolean; score?: Score },
+    runId = "baseline-run",
+  ): ExperimentRun {
+    return {
+      runId,
+      startedAt: "2026-09-17T00:00:00.000Z",
+      finishedAt: "2026-09-17T00:01:00.000Z",
+      config: {
+        datasetId: "all",
+        datasetFiles: ["seed.jsonl", "adversarial.jsonl", "generated.jsonl"],
+        datasetSize: devCases.length,
+        split: "dev",
+        promptId: prompt.id,
+        promptVersion: 1,
+        promptSource: "registry",
+        mode: "live",
+        execution: "batch",
+        generationModel: "claude-sonnet-5",
+        judgeModel: "claude-sonnet-5",
+      },
+      usage: { inputTokens: 0, outputTokens: 0, unpricedModels: [] },
+      cases: devCases.map((c, i) => caseResult(c, shapes(i))),
+    };
+  }
+
+  it("rejects the first 2026-09-17 baseline shape: 185 of 229 judged", () => {
+    const baseline = run((i) => ({ generated: true, judged: i >= 44 }), "20260917T040103Z-all-dev-support-v1-d0rbl");
+    expect(() => assertBaselineUsable(baseline, prompt, devCases)).toThrow(
+      /judge coverage is 0\.808 \(185 of 229/,
+    );
+  });
+
+  it("rejects the second 2026-09-17 baseline shape: 226 of 229 judged, 1 generation failure", () => {
+    const baseline = run(
+      (i) => ({ generated: i !== 0, judged: i !== 1 && i !== 2 }),
+      "20260917T044437Z-all-dev-support-v1-leqx2",
+    );
+    let message = "";
+    try {
+      assertBaselineUsable(baseline, prompt, devCases);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/generation success rate is 0\.996 \(1 of 229/);
+    expect(message).toMatch(/judge coverage is 0\.987 \(226 of 229/);
+  });
+
+  it("rejects a single truncated judge reply", () => {
+    const baseline = run((i) => ({ generated: true, judged: i !== 100 }));
+    expect(() => assertBaselineUsable(baseline, prompt, devCases)).toThrow(/judge coverage is 0\.996/);
+  });
+
+  it("rejects a single generation failure even when every output was judged", () => {
+    const baseline = run((i) => ({ generated: i !== 7, judged: true }));
+    expect(() => assertBaselineUsable(baseline, prompt, devCases)).toThrow(/generation success rate is 0\.996/);
+  });
+
+  it("accepts a completely measured baseline", () => {
+    expect(() => assertBaselineUsable(run(() => ({ generated: true, judged: true })), prompt, devCases)).not.toThrow();
+  });
+
+  it("accepts a completely measured baseline that fails every quality gate", () => {
+    // Policy and groundedness means of 1, every adversarial case scored 1:
+    // a poor prompt, fully measured, is a legitimate starting point.
+    const poor = run(() => ({ generated: true, judged: true, score: 1 }));
+    expect(() => assertBaselineUsable(poor, prompt, devCases)).not.toThrow();
+  });
+
+  it("still rejects the wrong split, prompt, mode and case set", () => {
+    const complete = run(() => ({ generated: true, judged: true }));
+    expect(() =>
+      assertBaselineUsable({ ...complete, config: { ...complete.config, split: "heldout" } }, prompt, devCases),
+    ).toThrow(/ran on split "heldout"/);
+    expect(() =>
+      assertBaselineUsable({ ...complete, config: { ...complete.config, mode: "offline" } }, prompt, devCases),
+    ).toThrow(/offline run/);
+    expect(() =>
+      assertBaselineUsable(complete, { ...prompt, id: "support-v2" }, devCases),
+    ).toThrow(/evaluated support-v1, not support-v2/);
+    expect(() => assertBaselineUsable(complete, prompt, devCases.slice(0, 200))).toThrow(
+      /different case set \(0 missing, 29 extra\)/,
+    );
   });
 });

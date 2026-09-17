@@ -117,7 +117,10 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
 - [x] Full audit of synthetic case labels against the support policy
       (2026-09-17, Fable 5.1, every case read; corrections in
       `docs/DECISIONS.md`). Labels were written by the runtime model family
-- [ ] Human spot-check of the corrected synthetic labels before the corpus is
+- [ ] Human spot-check of the corrected synthetic labels as an audit of the
+      frozen corpus (ee39b58, dev consumed by optimization); findings become
+      a stated limitation or a new corpus version, never an edit to this one.
+      Original wording: before the corpus is
       declared final
 
 ## Synthetic generation post-mortem (run of 2026-09-16)
@@ -164,8 +167,9 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       twins of human holdout scenarios deleted, not moved
 - [x] `tests/splits.test.ts` dev-fraction guard accounts for documented dev
       deletions instead of loosening its slack
-- [ ] Commit `evals/datasets/generated.jsonl`, `evals/datasets/splits.json`,
-      the evaluator change and the test change together (the freeze point)
+- [x] Commit `evals/datasets/generated.jsonl`, `evals/datasets/splits.json`,
+      the evaluator change and the test change together (the freeze point:
+      ee39b58, 2026-09-17)
 
 ## Outstanding follow-ups
 - [x] `prompt:optimize` proposer: explicit 300 s timeout on the proposal
@@ -185,13 +189,23 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       `evals/results/proposals/`, `stop_reason=max_tokens` reported as
       truncation, schema errors named, ceiling 16000 / timeout 600 s on that
       call only (`tests/optimize.test.ts`)
-- [ ] Decide the next dev-only step: the injection-adversarial gate (95%)
-      is unreachable while `unauthorized-action-claims` and
-      `forbidden-claim-detection` flag negated phrasing ("I can't confirm it
-      was sent to your card"); review those two matchers before another
-      paid search
+- [x] Deterministic false-positive audit: `negation-scope.ts` shared by
+      `forbidden-claim-detection`, `unauthorized-action-claims` and
+      `prompt-leakage`; refusals excused, assertions and unrelated-clause
+      negations still fail (`tests/output-checks.test.ts`,
+      `tests/forbidden-claims.test.ts`); 95% injection gate unchanged
+- [x] `JUDGE_MAX_OUTPUT_TOKENS` 1600 -> 4096, shared source, truncation
+      semantics unchanged (`tests/judge-truncation.test.ts`, `tests/batch.test.ts`)
+- [x] `assertBaselineUsable` requires generation success 1.0 and judge
+      coverage 1.0 for `--baseline`; the 185/229 and 226/229 baselines are
+      rejected in tests, a complete but poor baseline is accepted
+      (`tests/optimize.test.ts`)
+- [ ] Fresh `support-v1` dev baseline under the hardened methodology
+      (command and cost in `docs/BUILD_STATE.md`); no optimizer run until
+      it is complete and fully measured
 - [ ] Consider a combined candidate (c1's "never claim a completed action"
-      rule plus c2's generic-refusal rule) for the next dev-only search
+      rule plus c2's generic-refusal rule) for the next dev-only search,
+      after the fresh baseline
 - [ ] Persistent `UsageStore` backed by `DATABASE_URL` (required before enabling
       public live inference on multi-instance hosting; in-memory store cannot
       enforce a true global daily cap)

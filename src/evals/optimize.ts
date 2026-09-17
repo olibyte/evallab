@@ -11,7 +11,7 @@ import { escapeDelimiters } from "@/src/ai/prompts/untrusted";
 import type { EvalCase } from "@/src/schemas/eval-case";
 import { caseVerdict } from "./compare";
 import type { PromptCandidate } from "./candidates";
-import { evaluateGates, type RunMetrics } from "./metrics";
+import { computeMetrics, evaluateGates, type RunMetrics } from "./metrics";
 import { RESULTS_DIR, type ExperimentRun } from "./results";
 import type { UsageTracker } from "./paid-guard";
 
@@ -36,6 +36,10 @@ export const OPTIMIZER_PROPOSAL_MAX_OUTPUT_TOKENS = 16_000;
  * proposal call only; application inference keeps the default.
  */
 export const OPTIMIZER_PROPOSAL_TIMEOUT_MS = 600_000;
+
+function round(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
 
 export const PROPOSAL_TRUNCATED_MESSAGE =
   "Prompt optimizer reply was truncated at the output ceiling (stop_reason=max_tokens); no candidates were read from it.";
@@ -183,9 +187,12 @@ export function detectCaseLeakage(
 
 /**
  * A baseline run reused for optimization must have covered exactly the dev
- * cases about to be used, with the same prompt. Anything else either leaks
- * held-out cases into the proposer or compares candidates against a
- * different test.
+ * cases about to be used, with the same prompt, and must have measured
+ * every one of them: every case generated valid output and every case
+ * carries a rubric. Anything else either leaks held-out cases into the
+ * proposer, compares candidates against a different test, or compares
+ * them against a mean over a subset. Quality is not checked here: a poor
+ * but completely measured baseline is a legitimate starting point.
  */
 export function assertBaselineUsable(
   baseline: ExperimentRun,
@@ -213,6 +220,17 @@ export function assertBaselineUsable(
   if (missing > 0 || extra > 0) {
     problems.push(
       `it covers a different case set (${missing} missing, ${extra} extra) from the ${devCases.length} dev case(s) selected`,
+    );
+  }
+  const metrics = computeMetrics(baseline);
+  if (metrics.cases === 0 || metrics.errors > 0) {
+    problems.push(
+      `its generation success rate is ${metrics.cases === 0 ? 0 : round(1 - metrics.errors / metrics.cases)} (${metrics.errors} of ${metrics.cases} case(s) without valid output), and optimization requires 1`,
+    );
+  }
+  if (metrics.rubric.coverage < 1) {
+    problems.push(
+      `its judge coverage is ${metrics.rubric.coverage} (${metrics.rubric.judgedCases} of ${metrics.cases} case(s) judged), and optimization requires 1`,
     );
   }
   if (problems.length > 0) {

@@ -242,9 +242,19 @@ describe("optimizer isolation", () => {
     expect(() => assertBaselineUsable(baseline, prompt, devCases)).toThrow(/different case set/);
   });
 
-  it("accepts a live dev-split baseline of the same prompt over the same cases", () => {
+  it("accepts a live dev-split baseline of the same prompt over the same cases, fully measured", () => {
+    const dimension = { rationale: "r", score: 5 as const };
+    const judged = caseResult({
+      caseId: "dev-1",
+      rubric: { policyCompliance: dimension, groundedness: dimension, helpfulness: dimension, tone: dimension },
+      automatedQualityScore: 100,
+    });
+    expect(() => assertBaselineUsable(run([judged], { split: "dev" }), prompt, devCases)).not.toThrow();
+  });
+
+  it("rejects a dev-split baseline whose cases were not all judged", () => {
     const baseline = run([caseResult({ caseId: "dev-1" })], { split: "dev" });
-    expect(() => assertBaselineUsable(baseline, prompt, devCases)).not.toThrow();
+    expect(() => assertBaselineUsable(baseline, prompt, devCases)).toThrow(/judge coverage is 0/);
   });
 
   it("detects a candidate prompt that quotes a dev case", () => {
@@ -355,7 +365,7 @@ describe("live sequential run records", () => {
       // The fake models are not models that accept `temperature`, so the
       // run record must not claim one was sent. See tests/model-compat.
       generationParams: { maxOutputTokens: 1024 },
-      judgeParams: { maxOutputTokens: 1600 },
+      judgeParams: { maxOutputTokens: 4096 },
     });
     expect(result.config.datasetHash).toMatch(/^[0-9a-f]{64}$/);
     expect(result.config.promptHash).toMatch(/^[0-9a-f]{64}$/);
