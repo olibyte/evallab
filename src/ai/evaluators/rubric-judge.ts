@@ -9,6 +9,7 @@ import {
   type RubricEvaluation,
 } from "@/src/schemas/evaluation";
 import type { SupportResponse } from "@/src/schemas/support";
+import { isTruncated } from "@/src/ai/client/stop-reason";
 
 /**
  * Output ceiling for one judge call, on both the sequential and the Batch
@@ -22,17 +23,13 @@ import type { SupportResponse } from "@/src/schemas/support";
  */
 export const JUDGE_MAX_OUTPUT_TOKENS = 4096;
 
-/** The stop reason the API reports when a reply hit the output ceiling. */
-export const TRUNCATED_STOP_REASON = "max_tokens";
+export { isTruncated, TRUNCATED_STOP_REASON } from "@/src/ai/client/stop-reason";
 
 export const JUDGE_TRUNCATED_MESSAGE =
   "Judge reply was truncated at the output ceiling (stop_reason=max_tokens); no rubric was scored.";
 
 export const JUDGE_MALFORMED_MESSAGE = "Judge did not return a valid rubric evaluation.";
 
-export function isTruncated(stopReason: string | undefined): boolean {
-  return stopReason === TRUNCATED_STOP_REASON;
-}
 
 /**
  * Rationale precedes score in every dimension so the score is produced

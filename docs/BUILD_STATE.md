@@ -13,11 +13,11 @@ Current branch: main
 Corpus freeze commit: ee39b58 (`Fix final evaluation corpus expectation`,
 2026-09-17). The corpus and split manifest have not changed since, and the
 dev split has now been consumed by one prompt optimization.
-Last known green commit: 70fc096 (`Fix live optimizer paths and preserve
-the first completed dev optimization`) and the methodology-hardening commit
-that follows it on `main`; both were validated as below with a clean tree.
-Last validation run: 2026-09-17 (after the methodology hardening) - `pnpm
-lint`, `pnpm typecheck`, `pnpm test` (315 passing, 24 files), `pnpm build`,
+Last known green commit: 013799f (`Harden evaluation methodology after the
+first dev optimization`) and the generation-truncation commit that follows
+it on `main`; both were validated as below with a clean tree.
+Last validation run: 2026-09-17 (after the generation-truncation fix) - `pnpm
+lint`, `pnpm typecheck`, `pnpm test` (325 passing, 25 files), `pnpm build`,
 `pnpm eval:splits --check` and `pnpm eval:smoke` (offline) pass. Paid calls
 since the corpus freeze: the interrupted first dev optimization and the
 completed second one, both described under "Dev optimization" below.
@@ -95,6 +95,20 @@ that file was reverted and is not part of the change.
   and the corrected 369 cases were assigned once; the 56 human entries are
   byte-identical to HEAD. `forbidden-claim-detection` now excuses negated
   refusals and attributed quotations. Details in `docs/DECISIONS.md`.
+- Generation truncation (2026-09-17, no model calls): the one baseline
+  generation failure, `gen-733f267984ea`, was `stop_reason=max_tokens` on
+  both attempts at the 1024-token ceiling (read back from the stored batch
+  results: 1024 output tokens billed, 181 and 210 characters of text, so
+  about 980 tokens of adaptive thinking each time). Valid replies in the
+  same run used median 198 / p90 325 / p95 444 / p99 667 / max 731 output
+  tokens; none reached 800. `GENERATION_MAX_OUTPUT_TOKENS = 2048` now
+  reaches the sequential and Batch generation paths; a reply that stops on
+  `max_tokens` is refused before parsing, retried once like a malformed
+  reply, and recorded as generation truncation (a failure) rather than
+  "did not return valid structured output". Batch progress now prints the
+  API request counts (`api ended - succeeded=...`) and the parsed outcomes
+  (`parsed - valid_output=... truncated=... malformed=...`) as separate
+  lines. Details in `docs/DECISIONS.md`.
 - Evaluation-methodology hardening (2026-09-17, no model calls, after the
   dev optimization): `JUDGE_MAX_OUTPUT_TOKENS` 1600 -> 4096 on the shared
   sequential/Batch source with truncation semantics unchanged; a reused
@@ -195,10 +209,15 @@ ANTHROPIC_JUDGE_MODEL=claude-sonnet-5 pnpm prompt:optimize --dataset all
 cases, `EVAL_MAX_CASES` unset. The baseline
 `20260917T044437Z-all-dev-support-v1-leqx2` completed ($1.6989). Exact
 run-record truth: 228 of 229 cases carry valid output; `gen-733f267984ea`
-returned invalid structured output on the initial batch and again on the
-single-case retry, spending the full 1024-token generation ceiling both
-times (the batch log's "succeeded=229" counts API completions, not valid
-outputs). 226 of 229 judged: 2 replies truncated at 1600 and the failed
+stopped on `max_tokens` at the 1024-token generation ceiling on the
+initial batch (`msgbatch_01LgSdgtZT4UgGyd1RvoEVMa`) and again on the
+single-case retry (`msgbatch_01XP7VGrSyyc7gXqwcbYuQYE`), 1283 input / 1024
+output tokens each time with 181 and 210 characters of visible text: a
+thinking spike on a long, rambling duplicate-charge message, not a long
+reply. The run record labels it "did not return valid structured output"
+because truncation was not yet distinguished; the record is unchanged.
+The batch log's "succeeded=229" counts API completions, not valid
+outputs. 226 of 229 judged: 2 replies truncated at 1600 and the failed
 case never reached the judge. Generation success 0.996, judge coverage
 0.987. The proposer then failed on an unparseable reply at the 8000-token
 ceiling. After the fix in `docs/DECISIONS.md` the run was resumed with
@@ -330,9 +349,10 @@ shorter-rationale cases and are not a benchmark.
    ```
 
    Estimated cost about $1.75-1.90: the 2026-09-17 baseline cost $1.70 at
-   the 1600-token judge ceiling (806k input / 179k output tokens at the
-   batch rate); the 4096 ceiling only lengthens the few replies that were
-   cut off. The judge stage was queued for up to two and a half hours on
+   the 1600-token judge and 1024-token generation ceilings (806k input /
+   179k output tokens at the batch rate); the 4096 judge and 2048
+   generation ceilings only lengthen the few replies that were cut off
+   (three judge replies and one generation, under $0.05 together). The judge stage was queued for up to two and a half hours on
    the Batch API; keep the process alive or recover with
    `pnpm eval:run --resume <run-id>`. Confirm before submission that 229
    cases are selected and `EVAL_MAX_CASES` is unset. Then check the run

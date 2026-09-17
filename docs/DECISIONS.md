@@ -839,3 +839,74 @@ rate. Deterministic pass rates of past runs are not comparable to future
 ones on the three affected checks; the benchmark write-up must cite the
 evaluator version (this entry). The runtime guardrails no longer block a
 correct refusal that names the refused thing.
+
+## 2026-09-17 - Generation truncation is named; generation ceiling 1024 -> 2048
+
+**Decision.** `GENERATION_MAX_OUTPUT_TOKENS = 2048` in
+`generate-support-response.ts` is the ceiling for every customer-response
+generation: the sequential path uses it as the default, `executeBatchRun`
+sets it on every generation request, and the run record reports it in
+`generationParams`. The client's generic `DEFAULT_MAX_OUTPUT_TOKENS`
+(1024) is unchanged and no longer reached by generation. On both paths a
+reply that stops on `max_tokens` is refused before parsing, never salvaged
+even when its text parses, retried once exactly as a malformed reply is,
+and recorded as `GenerationTruncatedError` / the batch message "Generation
+reply was truncated at the output ceiling (stop_reason=max_tokens); no
+customer response was accepted" when the retry fails too. It counts as a
+generation failure in `computeMetrics`. `isTruncated` moves to
+`src/ai/client/stop-reason.ts` and is shared with the judge. The
+application path (`handleSupportRequest`) calls the same function and so
+gets the same ceiling and the same refusal; nothing else about it changes.
+
+**Why.** Reading the stored results of the 2026-09-17 baseline's two
+generation batches (no new request) shows `gen-733f267984ea` with
+`stop_reason=max_tokens` on both attempts: 1283 input and exactly 1024
+output tokens each, with 181 and 210 characters of visible text. Sonnet 5
+thinks before it writes and the thinking counts against `max_tokens`, so
+about 980 tokens went to thinking about a long, rambling duplicate-charge
+message and the JSON was cut off in its first sentence. The other 228
+replies ended on `end_turn` with a median of 198, p90 325, p95 444, p99 667
+and maximum 731 output tokens; none reached 800, and the estimated
+thinking share peaked at about 530 tokens. So this is truncation, not a
+formatting failure, and it was reported as "did not return valid
+structured output", which points at the prompt.
+
+**Why 2048.** The largest valid reply is 731 tokens and the largest
+estimated thinking share about 530; 2048 is 2.8x the largest valid reply
+and covers a thinking spike of the size that broke the failed case with
+room to spare. A ceiling caps spend rather than adding to it, so 2048
+costs nothing on the 228 replies that fit in 1024. 4096 was not chosen
+because nothing in the distribution asks for it, and a ceiling that large
+would let a runaway reply cost four times a normal one before it is
+refused.
+
+**Batch reporting.** The batch log said `succeeded=229` for a stage that
+yielded 228 valid outputs, because the Batch API counts requests that
+returned a message. Progress callbacks now carry the API counts under an
+`api` status and, after parsing, a `parsed` tally of
+`valid_output` / `truncated` / `malformed` / `request_error` (and
+`scored` for the judge), plus a `final` generation tally after the retry.
+The run summary prints "without valid output" instead of "error(s)".
+Historical run records and logs are untouched.
+
+**Alternatives rejected.** Salvaging the surviving text: a customer
+response cut mid-sentence is not a response. A second retry: one retry
+already matches the sequential contract and the failed case would not have
+been saved by a third attempt at the same ceiling. Turning thinking off for
+generation: thinking is what the model uses on hard inputs, and the ceiling
+is the cheaper lever.
+
+**Validation.** `tests/generation-truncation.test.ts` (new: 2048 on both
+attempts and on every batch request; truncation refused even when the
+text parses and never salvaged; malformed kept distinct and classified by
+the last attempt; the single retry preserved on both paths; a case
+truncated twice has no output, fails `structured-output-validity`,
+carries both attempts' tokens and fails the generation-success gate; the
+`api`, `parsed` and `final` progress lines). `tests/methodology.test.ts`
+provenance expectation updated to 2048. Lint, typecheck, 325 tests in 25
+files, build, `eval:splits --check` and offline `eval:smoke` pass.
+
+**Consequences.** The next dev baseline is expected to cost about
+$1.75-1.90, the same as before within the ceiling changes' effect (under
+$0.05). Past run records that say "did not return valid structured output"
+may include truncations; `gen-733f267984ea` is the only known one.

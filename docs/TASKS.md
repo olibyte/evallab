@@ -200,6 +200,10 @@ Shared implementation checklist. Tasks map to `PROJECT_SPEC.md` requirements.
       coverage 1.0 for `--baseline`; the 185/229 and 226/229 baselines are
       rejected in tests, a complete but poor baseline is accepted
       (`tests/optimize.test.ts`)
+- [x] Generation-side failure investigated without a paid call: `max_tokens`
+      confirmed on both attempts; `GENERATION_MAX_OUTPUT_TOKENS = 2048` on
+      both paths, truncation named and retried once, API counts and parsed
+      outcomes reported separately (`tests/generation-truncation.test.ts`)
 - [ ] Fresh `support-v1` dev baseline under the hardened methodology
       (command and cost in `docs/BUILD_STATE.md`); no optimizer run until
       it is complete and fully measured

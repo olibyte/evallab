@@ -1,6 +1,5 @@
 import {
   createModelClient,
-  DEFAULT_MAX_OUTPUT_TOKENS,
   DETERMINISTIC_TEMPERATURE,
   type ModelRole,
 } from "@/src/ai/client/anthropic";
@@ -23,6 +22,7 @@ import {
 import {
   GenerationOutputError,
   generateSupportResponse,
+  GENERATION_MAX_OUTPUT_TOKENS,
 } from "@/src/ai/generation/generate-support-response";
 import { ACTIVE_JUDGE_PROMPT } from "@/src/ai/prompts/judges";
 import type { PromptDefinition } from "@/src/ai/prompts/types";
@@ -327,7 +327,7 @@ export async function runExperiment(
             ...samplingParamsFor(generationModel, {
               temperature: DETERMINISTIC_TEMPERATURE,
             }),
-            maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            maxOutputTokens: GENERATION_MAX_OUTPUT_TOKENS,
           }
         : undefined,
       judgeParams: judgeModel

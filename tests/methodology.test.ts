@@ -364,7 +364,7 @@ describe("live sequential run records", () => {
       judgePromptId: "judge-rubric-v2",
       // The fake models are not models that accept `temperature`, so the
       // run record must not claim one was sent. See tests/model-compat.
-      generationParams: { maxOutputTokens: 1024 },
+      generationParams: { maxOutputTokens: 2048 },
       judgeParams: { maxOutputTokens: 4096 },
     });
     expect(result.config.datasetHash).toMatch(/^[0-9a-f]{64}$/);

@@ -4,7 +4,12 @@ import type {
   PollOptions,
 } from "@/src/ai/client/batch";
 import { DETERMINISTIC_TEMPERATURE } from "@/src/ai/client/anthropic";
-import { buildGenerationUserContent } from "@/src/ai/generation/generate-support-response";
+import {
+  buildGenerationUserContent,
+  GENERATION_MALFORMED_MESSAGE,
+  GENERATION_MAX_OUTPUT_TOKENS,
+  GENERATION_TRUNCATED_MESSAGE,
+} from "@/src/ai/generation/generate-support-response";
 import { extractJsonObject } from "@/src/ai/generation/json";
 import {
   buildJudgeUserContent,
@@ -65,6 +70,34 @@ export type BatchRunOptions = {
   onStageSubmitted?: (stages: BatchStages) => void;
 };
 
+/**
+ * Outcome counts after parsing, as opposed to the Batch API's own request
+ * counts: a request the API reports as `succeeded` may still carry a
+ * truncated or malformed reply. The 2026-09-17 baseline logged
+ * "succeeded=229" for a stage that yielded 228 valid outputs.
+ */
+function tallyGeneration(outcomes: Iterable<BatchGenerationOutcome>): Record<string, number> {
+  const tally = { valid_output: 0, truncated: 0, malformed: 0, request_error: 0 };
+  for (const outcome of outcomes) {
+    if (outcome.output) tally.valid_output += 1;
+    else if (outcome.error === GENERATION_TRUNCATED_MESSAGE) tally.truncated += 1;
+    else if (outcome.error === GENERATION_MALFORMED_MESSAGE) tally.malformed += 1;
+    else tally.request_error += 1;
+  }
+  return tally;
+}
+
+function tallyJudge(outcomes: Iterable<BatchJudgeOutcome>): Record<string, number> {
+  const tally = { scored: 0, truncated: 0, malformed: 0, request_error: 0 };
+  for (const outcome of outcomes) {
+    if (outcome.rubric) tally.scored += 1;
+    else if (outcome.error === JUDGE_TRUNCATED_MESSAGE) tally.truncated += 1;
+    else if (outcome.error === JUDGE_MALFORMED_MESSAGE) tally.malformed += 1;
+    else tally.request_error += 1;
+  }
+  return tally;
+}
+
 export type BatchRunResult = {
   generation: Map<string, BatchGenerationOutcome>;
   judge: Map<string, BatchJudgeOutcome>;
@@ -98,10 +131,23 @@ async function runStage(
   return { batchId, results };
 }
 
+/**
+ * Mirrors `generateSupportResponse` for a batch item: a reply that stopped
+ * on `max_tokens` is truncation, reported as such and never parsed;
+ * anything else that fails the schema is malformed. Both are retried once
+ * and both leave the case without output if the retry fails too.
+ */
 function parseGeneration(result: BatchItemResult): BatchGenerationOutcome {
   if (result.error !== undefined || result.text === undefined) {
     return {
       error: result.error ?? "Batch request returned no content.",
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+    };
+  }
+  if (isTruncated(result.stopReason)) {
+    return {
+      error: GENERATION_TRUNCATED_MESSAGE,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
     };
@@ -114,7 +160,7 @@ function parseGeneration(result: BatchItemResult): BatchGenerationOutcome {
         outputTokens: result.outputTokens,
       }
     : {
-        error: "Generation did not return valid structured output.",
+        error: GENERATION_MALFORMED_MESSAGE,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
       };
@@ -176,6 +222,7 @@ export async function executeBatchRun(
     customId: evalCase.id,
     system: prompt.systemPrompt,
     userContent: buildGenerationUserContent(evalCase.input),
+    maxOutputTokens: GENERATION_MAX_OUTPUT_TOKENS,
     temperature: DETERMINISTIC_TEMPERATURE,
   }));
 
@@ -184,7 +231,7 @@ export async function executeBatchRun(
     generationRequests,
     usage,
     options.poll,
-    (status, counts) => options.onProgress?.("generation", status, counts),
+    (status, counts) => options.onProgress?.("generation", `api ${status}`, counts),
     stages.generation,
     submitted("generation"),
   );
@@ -203,6 +250,7 @@ export async function executeBatchRun(
       });
     }
   }
+  options.onProgress?.("generation", "parsed", tallyGeneration(generation.values()));
 
   const retryIds = [...generation.entries()]
     .filter(([, outcome]) => outcome.error !== undefined)
@@ -214,22 +262,27 @@ export async function executeBatchRun(
       generationRequests.filter((request) => retryIds.includes(request.customId)),
       usage,
       options.poll,
-      (status, counts) => options.onProgress?.("generation-retry", status, counts),
+      (status, counts) => options.onProgress?.("generation-retry", `api ${status}`, counts),
       stages.generationRetry,
       submitted("generationRetry"),
     );
     batchIds.push(retry.batchId);
 
+    const retried: BatchGenerationOutcome[] = [];
     for (const result of retry.results) {
       const parsed = parseGeneration(result);
       const previous = generation.get(result.customId);
       // Keep the tokens already spent on the first attempt.
-      generation.set(result.customId, {
+      const merged = {
         ...parsed,
         inputTokens: (previous?.inputTokens ?? 0) + parsed.inputTokens,
         outputTokens: (previous?.outputTokens ?? 0) + parsed.outputTokens,
-      });
+      };
+      generation.set(result.customId, merged);
+      retried.push(merged);
     }
+    options.onProgress?.("generation-retry", "parsed", tallyGeneration(retried));
+    options.onProgress?.("generation", "final", tallyGeneration(generation.values()));
   }
 
   const judge = new Map<string, BatchJudgeOutcome>();
@@ -258,7 +311,7 @@ export async function executeBatchRun(
     judgeRequests,
     usage,
     options.poll,
-    (status, counts) => options.onProgress?.("judge", status, counts),
+    (status, counts) => options.onProgress?.("judge", `api ${status}`, counts),
     stages.judge,
     submitted("judge"),
   );
@@ -267,6 +320,7 @@ export async function executeBatchRun(
   for (const result of judged.results) {
     judge.set(result.customId, parseJudge(result));
   }
+  options.onProgress?.("judge", "parsed", tallyJudge(judge.values()));
   for (const request of judgeRequests) {
     if (!judge.has(request.customId)) {
       judge.set(request.customId, {

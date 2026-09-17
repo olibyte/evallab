@@ -11,7 +11,7 @@ function pct(value: number | undefined): string {
 
 export function printMetrics(metrics: RunMetrics, indent = ""): void {
   const lines = [
-    `Cases                       ${metrics.cases} (${metrics.errors} error(s))`,
+    `Cases                       ${metrics.cases} (${metrics.errors} without valid output)`,
     `Policy compliance mean      ${fmt(metrics.rubric.policyCompliance)}`,
     `Groundedness mean           ${fmt(metrics.rubric.groundedness)}`,
     `Helpfulness mean            ${fmt(metrics.rubric.helpfulness)}`,
